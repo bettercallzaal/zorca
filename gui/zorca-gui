@@ -28,8 +28,22 @@ PORT = 7777
 
 # State cache: pane scraping costs ~1s per pane, so refresh in the
 # background and serve the cache instantly.
-CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": ""}
+CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
+         "drafts": [], "resolved": []}
 LOCK = threading.Lock()
+QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
+
+
+def queue_read():
+    try:
+        return json.load(open(QUEUE))
+    except Exception:
+        return []
+
+
+def queue_drop(did):
+    items = [i for i in queue_read() if i.get("id") != did]
+    json.dump(items, open(QUEUE, "w"), indent=1)
 
 
 def sh(args, timeout=60):
@@ -48,10 +62,10 @@ def orca_json(*args):
         return {}
 
 
-def load_tasks():
+def load_tasks(run_id):
     """task-list has no --json list shape everywhere; parse the text."""
     rows = []
-    for ln in sh([ORCA, "orchestration", "task-list"]).splitlines():
+    for ln in sh([ORCA, "orchestration", "task-list", "--run", run_id]).splitlines():
         ln = ln.strip()
         if not ln.startswith("task_"):
             continue
@@ -63,22 +77,35 @@ def load_tasks():
     return rows
 
 
+def current_run():
+    """Terminal bindings die on every Orca restart; discover, never bind."""
+    for ln in sh([ORCA, "orchestration", "run-list"]).splitlines():
+        if ln.startswith("run_") and "legacy" not in ln:
+            return ln.split()[0]
+    return ""
+
+
 def refresh():
     board = []
     try:
         board = json.loads(sh(["python3", BOARD, "--json"], timeout=120))
     except Exception:
         pass
-    gates = orca_json("orchestration", "gate-list").get("gates", [])
+    run_id = current_run()
+    gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
     for g in gates:
         try:
             g["options"] = json.loads(g.get("options") or "[]")
         except Exception:
             g["options"] = []
     runs = sh([ORCA, "orchestration", "run-list"]).splitlines()
+    pending = [g for g in gates if g.get("status") == "pending"]
+    resolved = [g for g in gates if g.get("status") != "pending"]
     with LOCK:
-        CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(),
-                     gates=gates, run=runs[0][:120] if runs else "")
+        CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
+                     gates=pending, resolved=resolved[-8:],
+                     drafts=queue_read(),
+                     run=runs[0][:120] if runs else "")
 
 
 def refresher():
@@ -145,6 +172,10 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
  <div>
   <h2>Panes <span class="stamp" id="stamp"></span></h2>
   <div id="panes"></div>
+  <h2>Drafts awaiting your tap <span id="dcount"></span></h2>
+  <div id="drafts"></div>
+  <h2>Recently resolved</h2>
+  <div class="card" id="resolved"></div>
  </div>
 </div>
 <div id="toast"></div>
@@ -184,6 +215,19 @@ async function load(){
   document.getElementById("tasks").innerHTML = s.tasks.map(t => `
     <div class="task"><span class="st st-${t.status}">${t.status}</span>
       <span>${esc(t.title)}</span></div>`).join("");
+  document.getElementById("dcount").textContent = "("+s.drafts.length+")";
+  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
+    <div class="card gate">
+      <div class="q"><b>${esc(d.repo)}</b>
+        <span class="stamp">${esc(d.reason)}</span></div>
+      <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"})'>Send</button>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"})'>Skip</button>
+    </div>`).join("") || '<div class="card">queue empty</div>';
+  document.getElementById("resolved").innerHTML = s.resolved.map(g => `
+    <div class="task"><span class="st st-completed">resolved</span>
+      <span>${esc(g.question.slice(0,70))} → <b>${esc(g.resolution||"")}</b></span>
+    </div>`).join("") || '<span class="stamp">none yet</span>';
 }
 load(); setInterval(load, 15000);
 </script></body></html>"""
@@ -225,6 +269,19 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/focus" and body.get("handle"):
             sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
             self._send(200, '{"ok": true}')
+        elif self.path == "/api/draft" and body.get("id"):
+            item = next((i for i in queue_read() if i["id"] == body["id"]), None)
+            ok = True
+            if item and body.get("action") == "send":
+                # The human tapped Send - this is Zaal's keystroke, so no
+                # auto-draft prefix; it carries his authority.
+                out = sh([ORCA, "terminal", "send", "--terminal",
+                          item["handle"], "--text", item["text"], "--enter"])
+                ok = "Sent" in out
+            if item:
+                queue_drop(body["id"])
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200 if ok else 500, json.dumps({"ok": ok}))
         else:
             self._send(400, '{"ok": false}')
 
