@@ -1,0 +1,56 @@
+#!/bin/zsh
+# zorca - bring the ZAO orchestration layer up, down, or report it.
+#
+#   zorca up       start GUI (:7777) + watcher (queue mode), idempotent
+#   zorca down     stop both
+#   zorca status   what is running, one glance
+#
+# Survives nothing by itself - run `zorca up` after a reboot or Orca
+# restart. The state it serves (orchestration DB, vault, queue file) is
+# durable; only these two processes are not.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
+
+GUI="$HOME/Documents/zorca/gui/zorca-gui"
+BOARD="$HOME/bin/orca-board"
+SKIP="${ORCA_BOARD_SKIP:-}"
+
+up() {
+  if ! pgrep -f "zorca-gui" >/dev/null; then
+    nohup python3 "$GUI" > /tmp/zorca-gui.log 2>&1 &
+    disown
+    echo "gui: started -> http://127.0.0.1:7777"
+  else
+    echo "gui: already running"
+  fi
+  if ! pgrep -f "orca-board --auto" >/dev/null; then
+    ORCA_BOARD_SKIP="$SKIP" nohup python3 "$BOARD" --auto 120 >/dev/null 2>&1 &
+    disown
+    echo "watcher: started (queue mode, 120s)"
+  else
+    echo "watcher: already running"
+  fi
+}
+
+down() {
+  pkill -f "zorca-gui" && echo "gui: stopped" || echo "gui: was not running"
+  pkill -f "orca-board --auto" && echo "watcher: stopped" \
+    || echo "watcher: was not running"
+}
+
+status() {
+  pgrep -f "zorca-gui" >/dev/null \
+    && echo "gui:     up  http://127.0.0.1:7777" || echo "gui:     down"
+  pgrep -f "orca-board --auto" >/dev/null \
+    && echo "watcher: up  (log ~/.zao/orca-board.log)" || echo "watcher: down"
+  command -v orca >/dev/null && orca status 2>/dev/null | head -1 \
+    | sed 's/^/orca:    /'
+  q=$(python3 -c "import json;print(len(json.load(open('$HOME/.zao/orca-drafts.json'))))" 2>/dev/null || echo 0)
+  echo "drafts:  $q queued"
+}
+
+case "${1:-status}" in
+  up) up ;;
+  down) down ;;
+  status) status ;;
+  *) sed -n '2,10p' "$0" ;;
+esac
