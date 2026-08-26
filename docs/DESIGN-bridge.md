@@ -1,238 +1,326 @@
 ---
 type: design
 status: proposed
+version: 2
 created: 2026-08-26
-component: zorca-bridge
-decides: where it runs, how it reaches the orchestrator, what it is allowed to do
+updated: 2026-08-26
+component: ZOE v2 lane control (was "zorca-bridge")
+decides: transport from the VPS to this Mac, the /lane chain, build order
 ---
 
-# ZORCA Bridge - design
+# ZOE v2 - lane control from chat
 
-A chat front end for ZORCA, so the operating loop that today needs a Mac
-keyboard can be driven from Telegram or Discord: read the ranked board, read
-pending gates, resolve a gate, approve or drop a queued draft, tail a lane,
-wake a parked lane.
+Zaal drives ZORCA lanes from Telegram: `/lane <request>` becomes a real Orca
+lane - worktree, pane, brief, dispatch - without touching the Mac.
 
-**Design only.** Nothing in this document is built. Every number below was
-measured on 2026-08-26 unless marked derived.
+**Design only. Nothing here is built.** Every measurement is dated
+2026-08-26 and shown as the command that produced it. Inferences are marked
+as inferences.
 
-## 0. Brief provenance
+## 1. What v2 changes
 
-The brief that produced this document arrived head-truncated in the pane -
-the failure mode PLAYBOOK.md already records (`terminal send` loses the HEAD
-of a long message, not the tail). What survived was: where it runs (VPS vs
-OpenMatter container vs both), the Telegram/Discord bridge, how it reaches
-the orchestrator (orca CLI over SSH / orchestration DB / ZORCA GUI API at
-:7777), staged build plan, design only, worker_done when committed.
+v1 of this document asked three questions. Zaal answered them, and two
+answers overturn v1's recommendation. Recording that rather than quietly
+rewriting:
 
-The scope below is reconstructed from ZORCA's own code plus the vault, not
-guessed silently. The component name `zorca-bridge` is this lane's choice and
-is the one thing Zaal may want to overrule.
+| Question | v1 said | Zaal's verdict | Consequence |
+|---|---|---|---|
+| Own bot or fold into ZOE? | leaned own bot, front end on the Mac | **Extend ZOE in place.** `@zaoclaw_bot` keeps its identity, audience and VPS deploy; v2 lands as versions. | **v1's core recommendation is dead.** The front end is on the VPS from day one. The transport hop v1 deferred to stage 4 is now stage 1's hardest part. |
+| `/lane` at all? | flagged it as spending money on a lock-screen tap | **Yes, and bigger than v1 imagined.** Not "resume a parked lane" - `/lane <request>` creates a new planned lane through the orchestrator. Highest-value feature. | It is stage 1, and it unblocks the rest. The money concern does not disappear; it becomes a confirm step and a TTL (section 3.3). |
+| Telegram or Discord first? | open | not picked; recommendation requested | Section 6. |
 
-## 1. The measurement that settles "where it runs"
+What survives v1 unchanged, because it was measured rather than assumed:
 
 ```
 $ ls -la /opt/homebrew/bin/orca
 /opt/homebrew/bin/orca -> /Applications/Orca.app/Contents/Resources/bin/orca
-$ file /opt/homebrew/bin/orca
-Bourne-Again shell script text executable
 ```
 
-The `orca` CLI is a shim into a macOS `.app`. It is not a daemon, not a
-static binary, and not portable. The orchestration DB it reads lives at
-`~/Library/Application Support/orca/orchestration.db`. The panes it drives are
-windows in a running Mac GUI app.
+The `orca` CLI is a bash shim into a macOS `.app`. **The actuator is
+Mac-forced.** No VPS and no container can run it. That is why this document
+is mostly about a transport.
 
-So the question "VPS vs OpenMatter container vs both" has a forced answer and
-it is neither of the two on offer:
+OpenMatter's status also survives, with Zaal's refinement: runtime candidate
+for **new capability**, never a rewrite of something that already runs
+(section 7).
 
-**The hands must be on the Mac. Only the mouth can move.**
+## 2. The shape
 
-Nothing on a Linux VPS or in a Hermes container can run `orca terminal send`,
-create a pane, or resolve a gate. Any design that puts the actuator off-Mac
-is designing a thing that cannot exist.
+Three processes, three hosts, one direction of travel.
 
-That leaves a genuine split, and this is the real decision:
+```
+  Telegram  ──▶  ZOE v2 (Hostinger VPS)  ──▶  bot_commands queue (Supabase)
+                                                        │
+                        the Mac polls outbound ─────────┘
+                                                        ▼
+                                          zorca-actuator (this Mac)
+                                                        │
+                                            POST 127.0.0.1:7777
+                                                        ▼
+                                                  orca CLI, panes
+```
 
-| Half | What it does | Where it can run |
-|---|---|---|
-| **Actuator** | `orca` CLI calls, orchestration DB reads, pane scraping | Mac only. Forced. |
-| **Front end** | Telegram/Discord long-poll or gateway, auth, formatting | Mac, VPS, or container. Free choice. |
+**Nothing ever connects INTO the Mac.** The Mac makes outbound HTTPS calls
+and nothing else. This is the property the whole design is bought for.
 
-### Recommendation: both halves on the Mac, for v1
+## 3. The transport - the actual question
 
-The front end is a long-poll loop against Telegram's API. It needs outbound
-HTTPS and nothing else - no inbound port, no public IP, no webhook, no TLS
-cert. The Mac already has outbound HTTPS. Putting the front end on the VPS
-buys one thing (it survives the Mac sleeping) and costs a transport hop, a
-second secret store, a second deploy target, and a new class of failure where
-the front end is up and cheerfully answering while the actuator is
-unreachable, which is the exact "service-pulse is not run-heartbeat" trap
-that let farscout zombie for two months.
+### 3.1 The three candidates
 
-Run both on the Mac under one launchd agent. Revisit only if Stage 4's
-survives-a-sleeping-Mac requirement becomes real.
-
-### Why not the OpenMatter container
-
-Ruled out on its own terms, not by preference:
-
-1. It cannot run `orca` (section 1).
-2. Credits are metered. The bridge is an idle long-poll that must run 24/7 -
-   the worst possible shape for per-hour billing. Derived rate 0.837 Cr/hr
-   against a ~12 Cr grant balance is under a day of continuous uptime.
-3. The credits are a partner grant earmarked for a newsletter-agent beta.
-   Spending them on infrastructure Zaal already owns is a cost regression and
-   a misuse of the grant's stated purpose.
-4. The container in question is Nous' Hermes Agent template, whose dashboard
-   and API server are the subject of an active exposure campaign. Adding a
-   bot token to that blast radius is a downgrade.
-
-OpenMatter stays WATCH as infra and live as a relationship. It is not the
-home for this.
-
-## 2. How the bridge reaches the orchestrator
-
-Three candidate paths were named. They are not alternatives - they are three
-layers, and the right answer uses two of them.
-
-| Path | Reads | Writes | Verdict |
+| | **A: SSH from VPS to Mac** | **B: :7777 over Tailscale** | **C: command queue the Mac polls** |
 |---|---|---|---|
-| **Orchestration DB direct** (`sqlite3 file:...?mode=ro`) | tasks, specs, gates - instant, no subprocess | never | **Adopt for reads.** Already the GUI's primary path with a CLI text-parse fallback when the schema shifts. Reuse both, including the fallback. |
-| **ZORCA GUI API at :7777** | `GET /api/state` - the whole cached board in one call | `POST /api/resolve`, `/api/focus`, `/api/lane`, `/api/draft` | **Adopt as the only write path.** |
-| **orca CLI over SSH** | anything | anything | **Reject for v1.** |
+| Direction | VPS dials the Mac | VPS dials the Mac | **Mac dials out only** |
+| Needs on the laptop | sshd, an authorized key, an open port on the tailnet | the GUI rebound off `127.0.0.1`, or a tunnel | nothing |
+| Depends on Tailscale | yes | yes | **no** |
+| Mac asleep / moved network | **fails** | **fails** | **queues, runs on wake** |
+| Verb surface | **arbitrary shell** | the 4 reviewed endpoints | **a fixed enum, server-enforced** |
+| Double-execute safety | none | none | **atomic claim, measured** |
+| New code | ssh wrapper | bind change + auth | actuator + one authz change |
+| Latency | instant | instant | one poll interval |
 
-### Why the GUI API and not the CLI
+### 3.2 Recommendation: C, the command queue - and it already exists
 
-The GUI already solved the two hard problems and solved them once:
+Not a new build. `ZAOcowork` already ships this control plane, and ZOE
+already speaks it.
 
-- **The pane scrape costs about 1 second per pane.** The GUI refreshes in a
-  background thread and serves a cache instantly. A bridge shelling out to
-  `orca-board --json` per message would make a 13-pane board a 13-second
-  reply, and would race the watcher for the same panes.
-- **Every mutation already has an audited shape.** `/api/draft` with
-  `action:send` deliberately omits the `[auto-draft]` prefix because a human
-  tapped it, and the code says so at the call site. `/api/lane` spawns a paid
-  session and the button says so. Re-implementing these in a second process
-  means re-deciding those calls, and one of them will be decided differently.
+Measured in `ZAOcowork` today:
 
-One actuator, two front ends (browser and chat). Not two actuators.
+- `POST /api/v1/bots/commands` enqueues. `GET /api/v1/bots/commands?bot=<self>`
+  pulls.
+- **The pull is an atomic claim.** The route updates
+  `status pending -> claimed` in the same statement it selects, so two
+  pollers cannot double-execute. This is in the code, not aspirational.
+- **A token can only pull its own bot's queue** - `if (self !== caller)
+  return 403`.
+- **The verb list is a server-enforced enum**, not free text:
+  `restart | pause | resume | run_task | ask` for bot-self,
+  `start | stop` for the fleet agent. An unknown command is rejected 400.
+- `POST /api/v1/bots/commands/:id/result` closes the loop; a token may only
+  complete a command addressed to its own bot.
+- `supabase/migrations/012_bot_commands.sql` states the design intent in its
+  own header: *"Pull-based: the board never connects to the VPS."*
 
-### Why not SSH
+And on ZOE's side, in the ZAOOS repo: `bot/src/lib/cowork.ts` is already a
+bot-token client for `/api/v1/*`, already calling `/api/v1/bots/heartbeat`
+and `/api/v1/items`. Adding a lane enqueue is a method on an existing client.
 
-SSH from a VPS into the Mac means a long-lived inbound key on a laptop, over
-Tailscale, whose DNS gap is a known failure that hits precisely when Zaal is
-on the move - which is the only time the bridge matters. It also re-opens
-arbitrary command execution as the transport, when the whole point of the
-GUI API is that the verb list is finite and each verb is reviewed. If Stage 4
-ever moves the front end to the VPS, the transport is a Tailscale-scoped HTTP
-call to :7777, not a shell.
+The queue's own migration header is the argument for C, inverted: it was
+built so the board never dials the VPS. We need the VPS never to dial the
+Mac. Same property, same mechanism, opposite direction.
 
-**Required change:** the GUI binds `127.0.0.1` only. Keep it that way. The
-bridge is a localhost client. It never widens that bind.
+**Why not A (SSH).** It puts a long-lived inbound key on a laptop that
+sleeps and changes networks, reachable only over Tailscale - which is
+**currently stopped** on this Mac (`tailscale status` -> `Tailscale is
+stopped`, measured today) and whose DNS gap is a recorded failure that hits
+precisely when Zaal is mobile, which is the only time this feature matters.
+Worse, it makes the transport arbitrary shell execution at the exact moment
+we are trying to keep the verb list finite and reviewed. Option C's verb
+enum is enforced by a server neither end controls.
 
-## 3. Command surface
+**Why not B (:7777 over Tailscale).** Same Tailscale dependency and the same
+sleeping-laptop failure, plus it requires rebinding the GUI off
+`127.0.0.1` - the one line v1 committed to never touching. B is A with a
+smaller verb list, and it still fails when the Mac is closed.
 
-Read verbs, anyone on the allowlist:
+**What C costs, stated plainly.** One poll interval of latency (10s
+suggested: a lane spawn is not interactive, and 10s keeps the row count
+sane). And the queue is only as available as Supabase. Both are acceptable;
+the sleeping-Mac behavior is worth more than the latency.
 
-| Command | Backed by |
-|---|---|
-| `/board` | `GET /api/state` -> panes, ranked, one line each |
-| `/gates` | cached pending gates, with options |
-| `/drafts` | the HOLD/QUEUE trail, `~/.zao/orca-drafts.json` |
-| `/tail <lane>` | pane text from cached state |
-| `/status` | the `zorca status` four lines |
+### 3.3 Three gaps in the existing queue, measured, that stage 1 must close
 
-Write verbs, Zaal only, each an explicit tap:
+These are real and none is hand-waved. Each was found by reading the route
+and the migration.
 
-| Command | Backed by | Note |
-|---|---|---|
-| `/gate <id> <resolution>` | `POST /api/resolve` | resolution echoed back before it fires |
-| `/send <draft-id>` | `POST /api/draft action:send` | carries Zaal's authority, no `[auto-draft]` prefix |
-| `/drop <draft-id>` | `POST /api/draft` | queue drop only |
-| `/focus <handle>` | `POST /api/focus` | |
-| `/lane <n>` | `POST /api/lane` | **spawns a paid session.** Must say so in the confirm. |
+1. **Enqueue requires a board SESSION, not a bot token.** The POST handler
+   opens `const session = await getSession()`. ZOE holds a bot token, so as
+   shipped **ZOE cannot enqueue anything.** This is the single hard
+   dependency of the whole design. Fix: extend the enqueue route to accept
+   bot-token auth for one new verb, `lane`, authorized by the Telegram
+   allowlist principal carried in `args`. Small and reviewable, but it is a
+   change to an authz path and must be reviewed as one. The alternative -
+   giving ZOE a session cookie - is impersonating a human user and is
+   rejected outright.
+2. **No TTL.** A command enqueued while the Mac is asleep executes whenever
+   the Mac wakes. For `/lane`, which spawns a paid Claude session, that is a
+   genuine hazard: fire from a phone, forget, and a pane opens six hours
+   later against the weekly cap. Fix: `args.expiresAt`, and the actuator
+   drops anything past it with an `error` result Zaal can see. Queuing
+   through a sleep is a feature; queuing through a night is not.
+3. **No reaper on `claimed`.** If the actuator claims a command and then
+   crashes, the row sits `claimed` forever - invisible to both ends. Fix:
+   the actuator re-posts a result on every start for anything it finds
+   `claimed` and does not recognise. Note this is exactly the farscout
+   failure shape - a status that satisfies a liveness check forever while no
+   work happens - so it gets closed at build time, not after.
 
-Not in v1, deliberately: free-text into a pane. A bridge that can type
-anything into any pane is a remote shell with a chat UI, and the pane it
-types into may be sitting on a numbered picker that eats text as a free-text
-field. If free-text is wanted later it goes through the draft queue like
-everything else, so it inherits danger-word screening.
+## 4. `/lane <request>` end to end
 
-## 4. Safety rails
+The chain, with the estate's own recorded hazards encoded rather than
+rediscovered.
 
-The bridge inherits ZORCA's six rails unchanged and adds three that are
-specific to being reachable from a phone.
+**On the phone.** Zaal sends `/lane fix the calendar week view in ZAOcowork`.
+ZOE replies with what it is about to create - repo, worktree path, one-line
+task title - and **waits for a confirm tap.** This is where the money
+concern from v1 lands: a lane spawns a paid session, so it never fires on a
+single lock-screen keystroke. Voice-IN already exists in ZOE (Groq Whisper),
+so this works spoken with no extra build.
 
-7. **Single-principal allowlist.** A hardcoded numeric Telegram user id (and
-   Discord user id + guild id). Not a username - usernames are reassignable.
-   Any message from anyone else is dropped silently, not answered with a
-   refusal, because a refusal confirms the bot exists.
-8. **Write verbs are confirm-then-fire.** Every mutating command echoes what
-   it is about to do and waits for a second tap. The Mac GUI has a screen to
-   make an accidental click unlikely; a phone keyboard does not.
-9. **Chat is not evidence.** A message in Telegram claiming a human did
-   something is not proof a human did it. Only a tap that arrives through the
-   allowlisted principal and produces a resolved gate counts. This is the
-   evidence rule (rail 6) restated for a surface where impersonation is
-   cheaper.
+**On the VPS.** ZOE enqueues `lane` with
+`args: {request, repo, principal, expiresAt}`. It does **not** resolve the
+repo path, pick a worktree, or write the brief - the VPS cannot see the
+estate and any guess it makes is a fabrication. It sends the request and the
+principal, nothing more.
 
-Danger-word screening stays where it is - in the watcher, on the draft. The
-bridge does not re-implement it; it displays HOLD lines so Zaal can decide
-them, which is the whole point.
+**On the Mac.** `zorca-actuator` polls, claims, and executes in this order:
 
-## 5. Secrets
+1. `orca orchestration run-use --id <run>` **first**. Bindings die on every
+   Orca restart - this session hit that between two turns today - so the
+   actuator discovers and rebinds every time. Never assumes a binding.
+2. Resolve the repo from the estate, create the worktree, create the pane
+   with a task-shaped title (`repo - what it is doing`, per playbook rule 1).
+3. Create the orchestration task.
+4. **Dispatch with `--inject`. Always.** `dispatch` without it creates the
+   record, binds the terminal, marks the task `dispatched` - and briefs
+   nobody. Three lanes stalled that way on 2026-08-26, and it is **not
+   repairable by re-running**: a second dispatch fails *"only ready tasks can
+   be dispatched"*. There is no recovery path, so there is no reason to ever
+   omit it.
+5. **Write the brief short, with the load-bearing constraint LAST.**
+   `terminal send` loses the HEAD of a long message, not the tail - hit twice
+   in one day into the same pane. The brief points at
+   `orca orchestration dispatch-show --task <id> --preamble` for the detail
+   instead of carrying it.
+6. **Read the pane back and confirm the brief is actually in it.** A dispatch
+   record is a coordinator-side fact, not evidence a worker was told
+   anything. If the readback fails, post an `error` result - do not report a
+   lane that may be sitting at an empty prompt.
+7. Post the result: task id, pane handle, worktree path.
 
-Bot token in `~/.zao/zao.env`, never in the repo, never in a transcript.
-Entered via `/secret`. If Stage 4 moves the front end to the VPS the token
-moves with it and the Mac keeps none - one token, one host, never both.
+**Back on the phone.** ZOE reports the task id and the pane, or reports the
+failure. Never "done" without the readback in step 6.
 
-## 6. Staged build plan
+**Not in scope, deliberately:** free text into an arbitrary pane. That is a
+remote shell with a chat UI, and a pane sitting on a numbered picker will eat
+the text as a free-text field. `/lane` creates lanes; it does not type into
+them.
 
-Each stage is shippable and useful alone. No stage requires the next.
+## 5. Where ZOE v2 lands
 
-**Stage 0 - read-only Telegram, one command.** Long-poll loop, allowlist
-check, `/board` only, rendered from `GET /api/state`. Proves the transport,
-the auth, and the formatting budget (Telegram's 4096-char message limit
-against a 13-pane board) before anything can mutate state. Half a day.
+`bot/src/` in ZAOOS, as a version - Zaal's instruction. New surface is a
+`lane` command module plus a method on the existing `lib/cowork.ts` client.
+The bot token, the deploy, the systemd unit, the audience and the identity
+are all unchanged. Nothing about ZOE v1 moves.
 
-**Stage 1 - the rest of the read verbs.** `/gates`, `/drafts`, `/tail`,
-`/status`. Still zero write paths. At this point the bridge already delivers
-the thing the vault's phone-hop note names as the top gap: a one-tap "which
-lane needs me" view that is not terminal-only.
+The actuator is new and lives here in `zorca`, as `bin/zorca-actuator`,
+started by `zorca up` alongside the GUI and the watcher.
 
-**Stage 2 - gates, the highest-value write.** `/gates` renders inline
-keyboard buttons from the gate's own `options` array, which the GUI already
-parses. Tap resolves via `POST /api/resolve`. Gates are the thing that blocks
-lanes for hours while Zaal is away from the desk, so this stage is where the
-bridge starts paying for itself. Confirm-then-fire from the first commit.
+## 6. Telegram first - and it is not really a preference
 
-**Stage 3 - the draft queue.** `/drafts`, `/send`, `/drop`. Push
-notification on new HOLD lines so Zaal learns of a held draft instead of
-polling for one. This is the stage that makes the watcher's queue mode
-genuinely asynchronous.
+Telegram is not a choice once "extend ZOE in place" is the verdict: ZOE **is**
+`@zaoclaw_bot`. Building Discord first would mean standing up a second
+identity to reach a bot that already has one, which contradicts the verdict.
 
-**Stage 4 - lane control and the survives-a-sleeping-Mac question.**
-`/focus`, `/lane`. Only here does the front-end-on-VPS question become real,
-and only if the Mac sleeping in the middle of a run turns out to be a
-frequent failure rather than a hypothetical. If it does: front end to the
-VPS, Tailscale-scoped HTTP to :7777, token moves off the Mac, and the
-bridge reports actuator-unreachable explicitly rather than going quiet.
+On the merits it also wins for stage 1:
 
-**Discord** is deliberately not a stage. It is a second adapter behind the
-same command layer, worth building only once the Telegram command set has
-stopped changing. Building both at once means every command decision gets
-made twice and the second one drifts.
+- Long-poll needs outbound HTTPS only - no inbound port, no public IP, no TLS
+  cert, no webhook to keep alive.
+- Voice-IN is already wired, so `/lane` by voice costs nothing extra. Spoken
+  lane creation while away from the desk is the actual use case.
+- It is where Zaal already is on the phone, and the vault's own phone-hop
+  note names "three apps for one loop" as the problem. A new bot makes it
+  four.
 
-## 7. Open for Zaal
+Discord's real advantages - threads per lane, more than one human watching,
+role-scoped permissions - all matter only when lanes have an audience beyond
+Zaal. That is a genuine future, not stage 1. It arrives as a second adapter
+behind the same command layer, once the command set has stopped moving.
+Building both now means every command decision is made twice and the second
+one drifts.
 
-1. Name: `zorca-bridge`, or fold it into ZOE (`@zaoclaw_bot`) as a command
-   group? ZOE already owns the phone surface and the vault note argues for
-   fewer apps, not more. Against: ZOE runs on the VPS and cannot reach the
-   Mac's `orca`, so folding in means the VPS-front-end hop at Stage 0 rather
-   than Stage 4.
-2. Does `/lane` belong in the bridge at all, given it spends money on a tap
-   from a lock screen?
-3. Telegram first, or Discord first?
+## 7. The OpenMatter slot
 
-Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md
+Zaal's rule: runtime candidate for **new capability, not a rewrite.** Applied
+here, that excludes the bridge, the actuator, and ZOE itself - all of which
+either already run somewhere or cannot run there at all.
+
+Admission test, three conditions, all required:
+
+1. The capability does not exist yet anywhere in the estate.
+2. It is compute-shaped and **bounded** - a call with an end, not a 24/7
+   idle poll. Metered billing punishes idleness, and a permanent poll against
+   a metered runtime is the worst possible shape.
+3. Losing it degrades a feature rather than breaking the loop.
+
+The first candidate that passes: **brief synthesis** - turning
+`/lane <one sentence>` into a properly-shaped brief with the right vault
+pointers. Today that inference would run on the Mac, on the same weekly cap
+the lanes themselves consume. It is net-new, it is bounded (one call per
+lane creation), and if it is unavailable the actuator falls back to a
+template brief and the lane still opens. Not stage 1 - stage 5, once there
+is a working chain to improve.
+
+## 8. Staged build plan
+
+**Stage 1 - `/lane` end to end.** Zaal's instruction: this is first, because
+it unblocks everything else. Five parts, none independently shippable, which
+is why they are one stage:
+
+- **1a. The enqueue authz change.** Bot-token auth for the new `lane` verb.
+  Section 3.3 gap 1. Nothing works before this; it is also the only part
+  that touches a security boundary, so it gets reviewed on its own.
+- **1b. TTL + the claimed-reaper.** Gaps 2 and 3, built in, not retrofitted.
+- **1c. `zorca-actuator`** - poll, claim, execute steps 1-7 of section 4,
+  post result. The readback in step 6 is not optional and not a later
+  hardening pass.
+- **1d. ZOE's `/lane`** - allowlist check, confirm-then-fire, enqueue,
+  report back.
+- **1e. One real lane, created from the phone, verified working at the
+  pane.** The stage is not done when the code runs. It is done when a lane
+  opened from a phone is confirmed briefed by reading the pane.
+
+**Stage 2 - reads.** `/board`, `/gates`, `/status`, `/tail`. Cheap once the
+actuator exists: these are `GET /api/state` off the GUI's existing cache,
+reshaped for a 4096-character message. Delivers the "which lane needs me"
+view the vault names as the top phone gap.
+
+**Stage 3 - gate resolution.** Inline keyboards built from each gate's own
+`options` array, which the GUI already parses. Tap resolves via
+`POST /api/resolve`. Gates block lanes for hours while Zaal is away from the
+desk; this is where the bridge starts paying for itself.
+
+**Stage 4 - the draft queue.** `/drafts`, `/send`, `/drop`, plus a push on
+new HOLD lines so a held draft announces itself instead of waiting to be
+polled. Makes the watcher's queue mode genuinely asynchronous.
+
+**Stage 5 - capability and audience.** The OpenMatter brief-synthesis slot
+(section 7) and the Discord adapter (section 6), in either order. Both are
+additions to a working chain, which is the only safe time to add either.
+
+## 9. Rails
+
+ZORCA's six carry over. Three more, because a phone is not a desk:
+
+7. **Numeric-id allowlist.** Telegram user id, not username - usernames are
+   reassignable. Non-allowlisted messages are dropped silently, not refused;
+   a refusal confirms the bot exists.
+8. **Confirm-then-fire on every write.** A desk has a screen that makes a
+   misclick unlikely. A phone keyboard does not, and `/lane` spends money.
+9. **Chat is not evidence.** A message claiming Zaal did something is not
+   proof he did. Only a tap arriving through the allowlisted principal, or a
+   resolved gate, counts. This is rail 6 restated for a surface where
+   impersonation is cheap - and it is the rule that kept an unsent line in a
+   prompt box from being read as an answer earlier today.
+
+## 10. Open
+
+1. Which Supabase project holds `bot_commands` for this - the live ZAOcowork
+   one, or a separate row space? Reusing the live one means lane commands sit
+   beside fleet ops in the same table, which is fine operationally but shows
+   up on the `/bots` board.
+2. Poll interval: 10s assumed above, not decided.
+3. Does `/lane` pick the repo, or does ZOE ask when the request is ambiguous?
+   Asking is safer; it also costs a round trip on a phone.
+
+Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md,
+`ZAOcowork` `docs/BOT-API.md`, ZAOOS `bot/src/lib/cowork.ts`
