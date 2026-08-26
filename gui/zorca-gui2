@@ -420,6 +420,32 @@ def sh2(args, timeout=15):
         return -1, ""
 
 
+# Default-branch candidates in the order they should be trusted. origin/HEAD
+# is the repo's own answer; the rest are the conventions to fall back on.
+BASE_REFS = ("origin/HEAD", "origin/main", "origin/master", "main", "master")
+
+
+def _ahead_of_main(cwd):
+    """(commits ahead of the default branch, which ref that was).
+
+    (None, "") when no default branch could be resolved or the count could
+    not be read - a repo whose main we cannot find is not a repo with
+    nothing outstanding.
+    """
+    for ref in BASE_REFS:
+        rc, out = sh2(["git", "-C", cwd, "rev-parse", "--verify", "--quiet", ref])
+        if rc != 0 or not out.strip():
+            continue
+        rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", ref + "..HEAD"])
+        if rc2 != 0:
+            return None, ""
+        try:
+            return int(out2.strip() or "0"), ref
+        except ValueError:
+            return None, ""
+    return None, ""
+
+
 def estate_sweep(cwds):
     """Work at risk across the LIVE worktrees - measured, never estimated.
 
@@ -430,8 +456,18 @@ def estate_sweep(cwds):
 
     Anything that cannot be read is counted as `unmeasured` and said out
     loud. A repo we failed to read is not a repo with nothing at risk.
+
+    Also measures ahead-of-main in the same pass, because it is the same loop
+    over the same repos and spawning git twice per worktree would double the
+    cost of the slowest part of the refresh. The two are different questions:
+    `unpushed` is ahead of the branch's OWN upstream, so a pushed branch is
+    zero; `ahead` is ahead of the default branch, which stays non-zero for
+    every commit that has not merged. A lane committing steadily onto a
+    branch that never lands reads as healthy on the first and does not on the
+    second.
     """
     dirty = unpushed = noremote = unmeasured = 0
+    ahead_rows, ahead_unmeasurable = [], 0
     seen, checked = set(), 0
     for cwd in cwds:
         if not cwd or cwd in seen:
@@ -446,6 +482,12 @@ def estate_sweep(cwds):
             continue
         if out.strip():
             dirty += 1
+        n_ahead, base = _ahead_of_main(cwd)
+        if n_ahead is None:
+            ahead_unmeasurable += 1
+        elif n_ahead > 0:
+            ahead_rows.append(dict(repo=os.path.basename(cwd), n=n_ahead,
+                                   base=base, cwd=cwd))
         rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", "@{u}..HEAD"])
         if rc2 != 0:
             # No upstream at all: the branch exists only on this disk.
@@ -471,9 +513,13 @@ def estate_sweep(cwds):
                 break
     except Exception:
         swept = ""
+    ahead_rows.sort(key=lambda r: -r["n"])
     return dict(checked=checked, dirty=dirty, unpushed=unpushed,
                 noremote=noremote, unmeasured=unmeasured, full_swept=swept,
-                note=ESTATE_NOTE)
+                note=ESTATE_NOTE, ahead=ahead_rows[:10],
+                ahead_total=sum(r["n"] for r in ahead_rows),
+                ahead_repos=len(ahead_rows),
+                ahead_unmeasurable=ahead_unmeasurable)
 
 
 def drafts_age(now=None):
@@ -582,6 +628,7 @@ def trend_values(board, tasks, estate, dage):
         "ctx_critical": rank(0),
         "estate_risk": (None if not estate else
                         estate["dirty"] + estate["unpushed"] + estate["noremote"]),
+        "ahead_total": None if not estate else estate["ahead_total"],
         "drafts_queued": (None if not dage or dage.get("count") is None
                           else dage["count"]),
     }
@@ -746,7 +793,7 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
 #strip { display:grid; gap:8px;
-         grid-template-columns:repeat(auto-fit, minmax(178px, 1fr)); }
+         grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
 .cell { background:var(--panel); border:1px solid var(--line);
         border-radius:var(--r); padding:8px 11px; min-width:0; }
 .cell .k { display:block; font-size:11px; letter-spacing:.14em;
@@ -914,7 +961,10 @@ h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
      wall drops the duplicate. On desktop both stay, so the wall reads as a
      complete picture of what is running. */
   #panes .pane.dup { display:none; }
-  #strip { grid-template-columns:1fr 1fr; }
+  #strip { grid-template-columns:1fr 1fr; gap:6px; }
+  .cell { padding:6px 9px; }
+  .cell .trend { margin-top:2px; }
+  .cell .src { margin-top:2px; }
   #sincecount { display:block; margin-top:2px; }
   #needbtn { font-size:17px; }
   .actline { gap:8px; }
@@ -976,6 +1026,7 @@ h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
    <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
+   <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
    <h2>Where these numbers live</h2>
    <div class="card jamsrc" id="provenance" style="opacity:1"></div>
   </div>
@@ -1064,10 +1115,13 @@ function renderFeed(s){
   // reading cost. The COUNT stays visible at the top - that is the stat -
   // and the rows themselves sit one tap down, which is where reading
   // belongs. A laptop has the room, so it stays open there.
-  const phone = window.innerWidth <= 720;
+  // The fold threshold is wider than the phone breakpoint on purpose: a
+  // 768-wide window has a laptop's layout and a phone's height budget, and
+  // six rows of prose put the action list under the fold there too.
+  const phone = window.innerWidth <= 900;
   const el = document.getElementById("since");
   if (el.dataset.userset !== "1") el.open = !phone;
-  const show = all.slice(0, phone ? 6 : 6);
+  const show = all.slice(0, 5);
   document.getElementById("feed").innerHTML = show.map(r => {
     const isNew = r.ts && r.ts > mark;
     const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
@@ -1227,6 +1281,7 @@ function renderOrphans(s){
    is no arrow, because one number is a value, not a trend. */
 const TREND_META = {
   lanes_waiting: { cell: "lanes",          of: "waiting",   goodUp: false },
+  ahead_total:   { cell: "not on main",    of: "off main",  goodUp: false },
   tasks_done:    { cell: "tasks",          of: "done",      goodUp: true  },
   ctx_critical:  { cell: "ctx critical",   of: "ctx-critical", goodUp: false },
   estate_risk:   { cell: "estate at risk", of: "at risk",   goodUp: false },
@@ -1234,13 +1289,13 @@ const TREND_META = {
 };
 
 function baselineFor(hist, key, mark){
-  if (!mark) return { why: "first look on this browser - no baseline yet" };
+  if (!mark) return { why: "no baseline yet - first look here" };
   const usable = (hist || []).filter(h =>
     h && h.ts <= mark && h.v && h.v[key] !== null && h.v[key] !== undefined);
   if (!usable.length) {
     return { why: (hist || []).length
-      ? "nothing measured before your last look"
-      : "no observations recorded yet" };
+      ? "no reading before your last look"
+      : "no observations yet" };
   }
   return { sample: usable[usable.length - 1] };
 }
@@ -1287,6 +1342,27 @@ function draftsCell(s){
   return ["oldest draft", "~/.zao/orca-drafts.json",
           `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
           `<b>${d.count}</b> queued${undated}`, "drafts_queued"];
+}
+
+/* Work that has not reached main. Different question from `unpushed`: a
+   branch pushed to origin is zero unpushed and still ahead of main, which is
+   exactly the lane that commits steadily onto something that never lands. */
+function aheadCell(s){
+  const e = s.estate;
+  if (!e) {
+    return ["not on main", "no worktree could be read",
+            `<b class="bad">unknown</b>`, "ahead_total"];
+  }
+  const unm = e.ahead_unmeasurable
+    ? ` &middot; <b class="bad">${e.ahead_unmeasurable}</b> no main found` : "";
+  if (!e.ahead_total) {
+    return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
+            `<b class="nil">0</b> commits off main${unm}`, "ahead_total"];
+  }
+  return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
+          `<b class="flag">${e.ahead_total}</b> commits across ` +
+          `<b>${e.ahead_repos}</b> lane${e.ahead_repos === 1 ? "" : "s"}${unm}`,
+          "ahead_total"];
 }
 
 /* Work at risk across the live worktrees. Never a reassuring zero when the
@@ -1347,12 +1423,13 @@ function strip(s){
       (critical ? " needs a handoff" : " - none near full"), "ctx_critical"],
     ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null],
     estateCell(s),
-    draftsCell(s)
+    draftsCell(s),
+    aheadCell(s)
   ];
   document.getElementById("strip").innerHTML = cells.map(([k, src, v, tk]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
     (tk ? trendSpan(tk, trendNow[tk], s)
-        : `<span class="trend"><span class="none">freshness, not a stock - no trend</span></span>`) +
+        : `<span class="trend"><span class="none">no trend - freshness, not a stock</span></span>`) +
     `<span class="src">${esc(src)}</span></div>`).join("");
 }
 
@@ -1450,6 +1527,19 @@ async function load(){
     live.map(p => paneRow(p, p.rank <= 2)).join("")
     || '<div class="card">no live panes</div>';
   const e = s.estate;
+  document.getElementById("aheadlist").innerHTML = !e
+    ? '<span class="stamp">no worktree could be read this refresh</span>'
+    : ((e.ahead || []).map(a => `
+        <div class="task"><span class="st flag">${a.n}</span>
+          <span>${esc(a.repo)}</span>
+          <span class="stamp">ahead of ${esc(a.base)}</span></div>`).join("")
+       || '<span class="stamp">every live worktree is level with its default branch</span>')
+      + (e.ahead_unmeasurable
+         ? `<div class="stamp" style="margin-top:6px">${e.ahead_unmeasurable} `
+           + `worktree${e.ahead_unmeasurable === 1 ? "" : "s"} had no resolvable `
+           + `default branch - counted, not assumed level</div>` : "")
+      + (e.ahead_repos > (e.ahead || []).length
+         ? `<div class="stamp">${e.ahead_repos - e.ahead.length} more not listed</div>` : "");
   document.getElementById("provenance").innerHTML = [
     ["lanes, ctx critical, the wall",
      "python3 ~/bin/orca-board --json - one scrape per refresh, ~1s per pane"],
@@ -1463,6 +1553,13 @@ async function load(){
      "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
      "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
      "so neither fact alone can tell quiet from dead."],
+    ["not on main", e
+      ? "git rev-list --count &lt;base&gt;..HEAD per live worktree, where base is " +
+        "the first of origin/HEAD, origin/main, origin/master, main, master " +
+        "that resolves. Different from unpushed: a branch pushed to origin is " +
+        "zero unpushed and still ahead of main. A worktree whose default " +
+        "branch cannot be resolved is counted, never assumed level."
+      : "nothing could be read this refresh"],
     ["estate at risk", e
       ? "git status --porcelain and git rev-list --count @{u}..HEAD across the " +
         (e.checked) + " live worktrees on the board - not the full 48-clone " +
