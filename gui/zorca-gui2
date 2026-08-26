@@ -41,7 +41,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
-         "orphan_total": 0, "estate": None, "drafts_age": None}
+         "orphan_total": 0, "estate": None, "drafts_age": None, "trend": []}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -513,6 +513,80 @@ def drafts_age(now=None):
     return dict(state="ok", count=len(items), oldest=oldest, undated=undated)
 
 
+TREND = os.environ.get("ZORCA_TREND",
+                       os.path.expanduser("~/.zao/zorca-trend.json"))
+TREND_KEEP = 4320          # 24h at one sample per 20s refresh
+TREND_BUCKET = 600         # serve at most one sample per 10 minutes
+TREND_POINTS = 150         # ~25h of buckets
+
+
+def trend_record(values, now=None):
+    """Append this refresh's readings so a later one can be compared to it.
+
+    A stat that could not be measured is recorded as null, never as zero. A
+    zero would read as a real observation and a later comparison against it
+    would invent a trend out of a failed scrape - which is the exact thing a
+    trend arrow must never do.
+
+    Returns the decimated series to serve: at most one sample per 10 minutes,
+    newest kept, so the payload stays small while still reaching back a day.
+    """
+    now = now or time.time()
+    try:
+        hist = json.load(open(TREND))
+        if not isinstance(hist, list):
+            raise ValueError("trend file is not a list")
+    except Exception:
+        hist = []
+    if any(v is not None for v in values.values()):
+        hist.append(dict(ts=now, v=values))
+    else:
+        # Nothing was measurable this refresh. Recording an all-null sample
+        # would only add a point that can never serve as a baseline.
+        pass
+    hist = [h for h in hist if isinstance(h, dict) and h.get("ts")][-TREND_KEEP:]
+    try:
+        tmp = TREND + ".tmp"
+        os.makedirs(os.path.dirname(TREND), exist_ok=True)
+        json.dump(hist, open(tmp, "w"))
+        os.replace(tmp, TREND)
+    except Exception:
+        pass
+    # Decimate newest-first: keep the newest sample in each 10-minute bucket.
+    out, seen = [], set()
+    for h in reversed(hist):
+        b = int(h["ts"] // TREND_BUCKET)
+        if b in seen:
+            continue
+        seen.add(b)
+        out.append(h)
+        if len(out) >= TREND_POINTS:
+            break
+    out.reverse()
+    return out
+
+
+def trend_values(board, tasks, estate, dage):
+    """The one scalar per stat that a direction can be argued about.
+
+    Deliberately not every number in a cell. "3 working / 9 waiting / 0 idle"
+    has no single direction, so the trended scalar is named on the surface
+    rather than left for the reader to guess at.
+    """
+    def rank(r):
+        return sum(1 for p in board if p.get("rank") == r) if board else None
+    st = (lambda x: sum(1 for t in tasks if t.get("status") == x)) if tasks else None
+    return {
+        "lanes_waiting": rank(3),
+        "tasks_done": st("completed") if st else None,
+        "ctx_critical": rank(0),
+        "estate_risk": (None if not estate else
+                        estate["dirty"] + estate["unpushed"] + estate["noremote"]),
+        "drafts_queued": (None if not dage or dage.get("count") is None
+                          else dage["count"]),
+    }
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -577,14 +651,16 @@ def refresh():
     orphans, orphan_total = inflight_orphans(board)
     estate = estate_sweep([p.get("cwd") for p in board])
     dage = drafts_age()
+    tasks_now = load_tasks(run_id)
+    trend = trend_record(trend_values(board, tasks_now, estate, dage))
     daily = daily_events()
     with LOCK:
-        CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
+        CACHE.update(ts=time.time(), panes=board, tasks=tasks_now,
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
-                     orphans=orphans, orphan_total=orphan_total, estate=estate, drafts_age=dage,
+                     orphans=orphans, orphan_total=orphan_total, estate=estate, drafts_age=dage, trend=trend,
                      run=runs[0][:120] if runs else "")
 
 
@@ -680,6 +756,8 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 .good { color:var(--ok); } .bad { color:var(--warn); } .flag { color:var(--gold); }
 .nil { color:var(--dim); }
 
+.cell .trend { display:block; font-size:11px; margin-top:3px; }
+.cell .trend .none { color:var(--dim); opacity:.75; }
 .cell .src { display:block; font-size:10px; color:var(--dim); opacity:.75;
              margin-top:3px; line-height:1.3; }
 
@@ -1140,29 +1218,75 @@ function renderOrphans(s){
     </div>`).join("");
 }
 
+/* Trend against the reading from before your last look.
+
+   Four outcomes and they are not collapsed: no baseline at all (first look
+   on this browser), no reading old enough to compare against, an equal
+   reading (no change), or a real delta. A single reading never produces a
+   direction - if nothing was observed at or before the last-look mark there
+   is no arrow, because one number is a value, not a trend. */
+const TREND_META = {
+  lanes_waiting: { cell: "lanes",          of: "waiting",   goodUp: false },
+  tasks_done:    { cell: "tasks",          of: "done",      goodUp: true  },
+  ctx_critical:  { cell: "ctx critical",   of: "ctx-critical", goodUp: false },
+  estate_risk:   { cell: "estate at risk", of: "at risk",   goodUp: false },
+  drafts_queued: { cell: "oldest draft",   of: "queued",    goodUp: false },
+};
+
+function baselineFor(hist, key, mark){
+  if (!mark) return { why: "first look on this browser - no baseline yet" };
+  const usable = (hist || []).filter(h =>
+    h && h.ts <= mark && h.v && h.v[key] !== null && h.v[key] !== undefined);
+  if (!usable.length) {
+    return { why: (hist || []).length
+      ? "nothing measured before your last look"
+      : "no observations recorded yet" };
+  }
+  return { sample: usable[usable.length - 1] };
+}
+
+function trendSpan(key, current, s){
+  const meta = TREND_META[key];
+  if (current === null || current === undefined) {
+    return `<span class="trend"><span class="none">not measured this refresh</span></span>`;
+  }
+  const b = baselineFor(s.trend, key, seenAt());
+  if (b.why) return `<span class="trend"><span class="none">${esc(b.why)}</span></span>`;
+  const was = b.sample.v[key];
+  const at = new Date(b.sample.ts * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  if (was === current) {
+    return `<span class="trend"><span class="none">${meta.of} unchanged since ${at}</span></span>`;
+  }
+  const d = current - was;
+  const better = meta.goodUp ? d > 0 : d < 0;
+  return `<span class="trend"><b class="${better ? "good" : "bad"}">` +
+    `${d > 0 ? "+" : ""}${d}</b> ${esc(meta.of)} since ${at}</span>`;
+}
+
 /* How long the oldest queued draft has waited for a tap. "none queued" and
    "we could not read the queue" are different answers and stay different. */
 function draftsCell(s){
   const d = s.drafts_age;
   if (!d || d.state === "unreadable") {
     return ["oldest draft", "~/.zao/orca-drafts.json unreadable",
-            `<b class="bad">unknown</b>`];
+            `<b class="bad">unknown</b>`, "drafts_queued"];
   }
   if (!d.count) {
     return ["oldest draft", "~/.zao/orca-drafts.json",
-            `<b class="nil">none queued</b>`];
+            `<b class="nil">none queued</b>`, "drafts_queued"];
   }
   const undated = d.undated
     ? ` &middot; <b class="bad">${d.undated}</b> undated` : "";
   if (!d.oldest) {
     return ["oldest draft", "~/.zao/orca-drafts.json",
-            `<b class="bad">age unknown</b> &middot; <b>${d.count}</b> queued`];
+            `<b class="bad">age unknown</b> &middot; <b>${d.count}</b> queued`,
+            "drafts_queued"];
   }
   const age = Date.now()/1000 - d.oldest;
   const cls = age > 21600 ? "bad" : age > 3600 ? "flag" : "good";
   return ["oldest draft", "~/.zao/orca-drafts.json",
           `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
-          `<b>${d.count}</b> queued${undated}`];
+          `<b>${d.count}</b> queued${undated}`, "drafts_queued"];
 }
 
 /* Work at risk across the live worktrees. Never a reassuring zero when the
@@ -1171,7 +1295,7 @@ function estateCell(s){
   const e = s.estate;
   if (!e) {
     return ["estate at risk", "no worktree could be read",
-            `<b class="bad">unknown</b>`];
+            `<b class="bad">unknown</b>`, "estate_risk"];
   }
   const bit = (n, label, cls) =>
     `<b class="${n ? cls : "nil"}">${n}</b> ${label}`;
@@ -1180,7 +1304,8 @@ function estateCell(s){
              bit(e.noremote, "no remote", "bad")]
             .join(" &middot; ")
             + (e.unmeasured ? ` &middot; <b class="bad">${e.unmeasured}</b> unreadable` : "");
-  return ["estate at risk", `git status, ${e.checked} live worktrees`, v];
+  return ["estate at risk", `git status, ${e.checked} live worktrees`, v,
+          "estate_risk"];
 }
 
 /* The fleet, four numbers wide. A zero that should be zero renders dim; a
@@ -1192,6 +1317,14 @@ function strip(s){
   const st = x => T.filter(t => t.status === x).length;
   const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
   const stuck = (s.stuck || []).length;
+  const e0 = s.estate, d0 = s.drafts_age;
+  const trendNow = {
+    lanes_waiting: P.length ? n(3) : null,
+    tasks_done: T.length ? st("completed") : null,
+    ctx_critical: P.length ? n(0) : null,
+    estate_risk: e0 ? e0.dirty + e0.unpushed + e0.noremote : null,
+    drafts_queued: (d0 && d0.count !== null && d0.count !== undefined) ? d0.count : null,
+  };
   let wcls = "good", wtxt = "-";
   if (!s.watcher_alive) { wcls = "bad"; wtxt = "DOWN"; }
   else if (!s.watcher_ts) { wcls = "flag"; wtxt = "no log yet"; }
@@ -1205,18 +1338,21 @@ function strip(s){
       `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
       `<b class="nil">${n(6)}</b> free` +
-      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "")],
+      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : ""),
+      "lanes_waiting"],
     ["tasks", "orchestration.db", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
-      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
+      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`, "tasks_done"],
     ["ctx critical", "orca-board, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
-      (critical ? " needs a handoff" : " - none near full")],
-    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`],
+      (critical ? " needs a handoff" : " - none near full"), "ctx_critical"],
+    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null],
     estateCell(s),
     draftsCell(s)
   ];
-  document.getElementById("strip").innerHTML = cells.map(([k, src, v]) =>
+  document.getElementById("strip").innerHTML = cells.map(([k, src, v, tk]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
+    (tk ? trendSpan(tk, trendNow[tk], s)
+        : `<span class="trend"><span class="none">freshness, not a stock - no trend</span></span>`) +
     `<span class="src">${esc(src)}</span></div>`).join("");
 }
 
