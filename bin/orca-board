@@ -300,7 +300,9 @@ def queue_write(items):
 
 def queue_add(repo, handle, text, reason):
     items = queue_read()
-    if any(i["handle"] == handle and i["text"] == text for i in items):
+    # One queued draft per pane. A pane that idles for hours would otherwise
+    # accrue a fresh near-duplicate every tick (60 piled up overnight).
+    if any(i["handle"] == handle for i in items):
         return False
     items.append(dict(id="d%d" % int(time.time() * 1000), repo=repo,
                       handle=handle, text=text, reason=reason,
@@ -398,6 +400,13 @@ def auto(argv):
                     r["repo"], "picker" if r["state"] == "choice-prompt"
                     else "matched %s" % ",".join(flags[:3])))
                 logline("      %s" % (r["question"] or r["tail"])[:150])
+                continue
+            # Relay-loop guard (2026-08-26): if the pane's most recent input
+            # was an orchestrator relay or auto-draft, the pane is digesting
+            # it - drafting a follow-up now produces replies to our own
+            # messages, which the estate lane caught as "copies of this text".
+            tail_in = r.get("screen", "")[-1500:]
+            if "[orchestrator relay" in tail_in or "[auto-draft" in tail_in:
                 continue
             text = draft(r)
             if text == "NEEDS-ZAAL" or text.startswith("draft failed"):
