@@ -31,6 +31,26 @@ Division of labor: the watcher keeps lanes moving; Zaal (or the orchestrator
 session) decides everything irreversible; pane titles carry the task so the
 sidebar reads as a status board.
 
+## The division of labor (Zaal, 2026-08-26 - the standing rule)
+
+"The orchestrator here is in charge of Obsidian; any other requests go to a
+specific planned Orca channel / lane."
+
+| Surface | Writer | Never |
+|---|---|---|
+| The vault (notes, TOC, IN-FLIGHT, grill queue, daily, playbook) | The orchestrator session, directly | Dispatched to a lane |
+| Repo work (code, docs, research, builds) | A planned Orca lane per repo/topic | Done inline by the orchestrator |
+| A lane's own `.handoffs/` + repo-committed reports | That lane | - |
+| Dispatch bookkeeping, worker_done verification | The coordinator pane | Resolved gates it did not verify |
+| Gates (irreversibles, money, public, identity) | Zaal | Anyone else |
+
+Flow: request arrives at the orchestrator -> vault-shaped work happens here;
+everything else gets worktree + pane + brief (carrying vault *pointers*, not
+copies) + orchestration dispatch -> lane reports -> coordinator verifies ->
+orchestrator writes the vault record. One writer for the picture, many for
+the repos - the four-surfaces drift problem is prevented by construction,
+not by sync scripts.
+
 ## Conventions to adopt
 
 1. **One pane per lane, titled by task.** `repo - what it is doing`, renamed
@@ -49,6 +69,25 @@ sidebar reads as a status board.
 6. **Multi-agent state lives in the vault, not scrollback.** Findings land as
    committed docs (repo-local) plus a short vault note linking [[repo-estate]].
    Scrollback dies at compaction; the vault does not.
+
+## Standing policy - what counts as a disclosure
+
+Set by Zaal 2026-08-26, resolving `gate_283ff11d6f72`. It generalises; apply it
+rather than re-deciding each case.
+
+- **Aggregating already-public information is fine.** Republishing on-chain
+  addresses, balances, ENS names and other self-published facts in a convenient
+  table is not a disclosure. Convenience is not exposure.
+- **Genuinely-new private linkage still gates.** Binding a public identifier to
+  something only ZAO's own systems know - a `users` row, a Discord export, an
+  internal tier - is a disclosure and must be raised before publishing.
+
+The practical test: could a stranger derive this from public sources alone? If
+yes, publish. If it takes ZAO's private data to make the connection, gate it.
+
+Corollary learned the same day: **do not restate redacted content in the commit
+message or the report.** Describing precisely what was removed republishes it,
+which is the one way a redaction pass makes things worse.
 
 ## Known hazards (all hit today)
 
@@ -76,6 +115,34 @@ sidebar reads as a status board.
   The general form: agents under pressure to be decisive will assert state
   they cannot measure. Give every loop an honest "I cannot know this" exit
   and make provenance visible, or decisiveness becomes fabrication.
+- **Inference filed as measurement** (coordinator self-audit, 2026-08-26):
+  three of six gates were wrong at filing - a stale queue item read as "LLC
+  not formed", "unreferenced" read as "dead", a risk overstated. The
+  measurement was right each time; the conclusion drawn from it was filed as
+  if it were the measurement. Gate-writing rule: state what was measured,
+  state the inference separately, and let the human own the leap.
+- **`dispatch` without `--inject` silently briefs nobody** (2026-08-26): the
+  record is created, the terminal is bound, the task reads `dispatched` - and the
+  pane sits at an empty prompt with no idea it has work. All three morning lanes
+  stalled this way. It is not repairable through the same command: re-running
+  dispatch with `--inject` fails *"only ready tasks can be dispatched"*. Recover
+  by briefing the pane with `orca terminal send`, pointing it at
+  `orca orchestration dispatch-show --task <id> --preamble` for the protocol, and
+  always leading with `run-use --id <run>`. General form: a dispatch record is a
+  coordinator-side fact, not evidence a worker was told anything. Verify the pane
+  moved, the same way you verify a `worker_done`.
+- **`terminal send` loses the HEAD of a long message, not the tail** (2026-08-26,
+  hit twice into the same pane): a multi-paragraph brief arrived with only the
+  last three sentences intact the first time and only the last paragraph the
+  second. Both times the pane had recently crossed a compaction boundary. The
+  lane recovered by inferring the task from its title, then from the vault daily
+  note - and both times it SAID the brief was truncated instead of guessing
+  quietly, which is the only reason it was caught. Mitigations: put the
+  load-bearing constraint LAST, not first; keep briefs short and point the pane
+  at a file or command for the detail (`dispatch-show --preamble`, a vault note);
+  and read the pane back after sending anything that matters. A resolved gate
+  recorded in `daily/` is a durable second source a truncated worker can recover
+  from - which is an argument for writing decisions down the same hour they land.
 - **Pickers eat text**: a pane sitting on a numbered picker sends any text
   into a free-text field. The board detects choice-prompt; answer with arrow
   keys + Enter, verify cursor with a read first.
@@ -96,3 +163,17 @@ archive-the-14). Inspect: `orca orchestration task-list` /
   `repo-cleanup audit` snapshot.
 
 Related: [[repo-estate]], [[obsidian-second-brain]]
+
+## Stack snapshot - 2026-08-26 early morning (the agentic workflow update)
+
+Eight lanes live or queued under run_a4892c0a5cdc: fractal (Orca-native
+worktree, v0.2 pass, push held for Zaal's branch review), frapp-gh (day-1
+async game), ZID policy (tier 1000), estate PII pass, bonfire lane (fractgram
+indexing + dvl mojo search, outbound replies draft-only), dashboard-UI
+research + Obsidian X-post research (one pane, sequential), coordinator
+(verify + dispatch owner). Grill running here in the orchestrator via
+quick-grill batches; verdicts recorded same-tick. ZORCA public (MIT), GUI at
+:7777, watcher in queue mode, zorca up/down/status launcher. Orca itself
+turned out to be MIT open source - fork-with-upstream-sync chosen by Zaal
+over overlay-only (mechanism: gh repo fork + scheduled gh repo sync).
+Weekly cap: fumes until Wed 6am; Zaal accepts plan-move if it runs dry.
