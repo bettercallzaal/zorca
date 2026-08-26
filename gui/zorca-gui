@@ -62,18 +62,38 @@ def orca_json(*args):
         return {}
 
 
+ODB = os.path.expanduser(
+    "~/Library/Application Support/orca/orchestration.db")
+
+
 def load_tasks(run_id):
-    """task-list has no --json list shape everywhere; parse the text."""
+    """Straight from the orchestration DB, read-only - specs included.
+
+    file: URI with mode=ro so we can never write, and a busy_timeout so a
+    daemon write never wedges the refresh.
+    """
+    import sqlite3
     rows = []
-    for ln in sh([ORCA, "orchestration", "task-list", "--run", run_id]).splitlines():
-        ln = ln.strip()
-        if not ln.startswith("task_"):
-            continue
-        parts = ln.split()
-        tid = parts[0]
-        status = parts[1].strip("[]") if len(parts) > 1 else "?"
-        title = parts[2] if len(parts) > 2 else "?"
-        rows.append(dict(id=tid, status=status, title=title))
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % ODB, uri=True, timeout=3)
+        cur = con.execute(
+            "SELECT id, status, task_title, spec, created_at FROM tasks "
+            "ORDER BY created_at")
+        for tid, status, title, spec, upd in cur.fetchall():
+            rows.append(dict(id=tid, status=status, title=title or "?",
+                             spec=spec or "", updated=upd or ""))
+        con.close()
+    except Exception:
+        # Fall back to the CLI text parse if the schema shifts.
+        for ln in sh([ORCA, "orchestration", "task-list", "--run",
+                      run_id]).splitlines():
+            ln = ln.strip()
+            if ln.startswith("task_"):
+                parts = ln.split()
+                rows.append(dict(id=parts[0],
+                                 status=parts[1].strip("[]") if len(parts) > 1 else "?",
+                                 title=parts[2] if len(parts) > 2 else "?",
+                                 spec="", updated=""))
     return rows
 
 
@@ -242,9 +262,16 @@ async function load(){
       <span class="ctx">${p.ctx==null?"-":p.ctx+"%"}</span>
       <span class="detail">${esc(p.question||p.tail||"")}</span>
     </div>`).join("") || '<div class="card">no live panes</div>';
-  document.getElementById("tasks").innerHTML = s.tasks.map(t => `
-    <div class="task"><span class="st st-${t.status}">${t.status}</span>
-      <span>${esc(t.title)}</span></div>`).join("");
+  document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
+    <div class="task" style="cursor:pointer" onclick='
+      const el=document.getElementById("spec-"+${i});
+      el.style.display = el.style.display=="none" ? "block" : "none";'>
+      <span class="st st-${t.status}">${t.status}</span>
+      <span>${esc(t.title)}</span></div>
+    <div id="spec-${i}" style="display:none" class="detail"
+      ><div style="white-space:normal;padding:4px 0 10px 112px">
+      ${esc(t.spec)}<br><span class="stamp">${t.id} · ${esc(t.updated)}</span>
+      </div></div>`).join("");
   document.getElementById("dcount").textContent = "("+s.drafts.length+")";
   document.getElementById("drafts").innerHTML = s.drafts.map(d => `
     <div class="card gate">
