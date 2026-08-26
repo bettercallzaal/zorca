@@ -426,11 +426,21 @@ BASE_REFS = ("origin/HEAD", "origin/main", "origin/master", "main", "master")
 
 
 def _ahead_of_main(cwd):
-    """(commits ahead of the default branch, which ref that was).
+    """(commits ahead of the default branch, which ref, oldest unlanded ts).
 
-    (None, "") when no default branch could be resolved or the count could
-    not be read - a repo whose main we cannot find is not a repo with
+    (None, "", None) when no default branch could be resolved or the count
+    could not be read - a repo whose main we cannot find is not a repo with
     nothing outstanding.
+
+    The oldest unlanded commit is the LAST line of `git log <base>..HEAD`,
+    not `git log -1`. `-1` returns the newest commit in the range, which
+    answers "when did this lane last commit" - a question two other surfaces
+    already answer. The one nothing answers is how long the oldest thing has
+    been sitting off main, and that is the last line, because git logs
+    newest-first.
+
+    `oldest` is None when the count is known but the log could not be read,
+    so a measurable count never drags an unmeasurable age along with it.
     """
     for ref in BASE_REFS:
         rc, out = sh2(["git", "-C", cwd, "rev-parse", "--verify", "--quiet", ref])
@@ -438,12 +448,21 @@ def _ahead_of_main(cwd):
             continue
         rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", ref + "..HEAD"])
         if rc2 != 0:
-            return None, ""
+            return None, "", None
         try:
-            return int(out2.strip() or "0"), ref
+            n = int(out2.strip() or "0")
         except ValueError:
-            return None, ""
-    return None, ""
+            return None, "", None
+        if n == 0:
+            return 0, ref, 0
+        rc3, out3 = sh2(["git", "-C", cwd, "log", ref + "..HEAD", "--format=%ct"])
+        oldest = None
+        if rc3 == 0:
+            stamps = [l for l in out3.split() if l.strip().isdigit()]
+            if stamps:
+                oldest = int(stamps[-1])
+        return n, ref, oldest
+    return None, "", None
 
 
 def estate_sweep(cwds):
@@ -467,7 +486,7 @@ def estate_sweep(cwds):
     second.
     """
     dirty = unpushed = noremote = unmeasured = 0
-    ahead_rows, ahead_unmeasurable = [], 0
+    ahead_rows, ahead_unmeasurable, age_unmeasurable = [], 0, 0
     seen, checked = set(), 0
     for cwd in cwds:
         if not cwd or cwd in seen:
@@ -482,12 +501,14 @@ def estate_sweep(cwds):
             continue
         if out.strip():
             dirty += 1
-        n_ahead, base = _ahead_of_main(cwd)
+        n_ahead, base, oldest_ts = _ahead_of_main(cwd)
         if n_ahead is None:
             ahead_unmeasurable += 1
         elif n_ahead > 0:
+            if oldest_ts is None:
+                age_unmeasurable += 1
             ahead_rows.append(dict(repo=os.path.basename(cwd), n=n_ahead,
-                                   base=base, cwd=cwd))
+                                   base=base, cwd=cwd, oldest=oldest_ts))
         rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", "@{u}..HEAD"])
         if rc2 != 0:
             # No upstream at all: the branch exists only on this disk.
@@ -513,10 +534,16 @@ def estate_sweep(cwds):
                 break
     except Exception:
         swept = ""
-    ahead_rows.sort(key=lambda r: -r["n"])
+    # Oldest unlanded work first: 3 commits stranded since July matter more
+    # than 66 from this morning, and sorting by count buries exactly that.
+    ahead_rows.sort(key=lambda r: (r["oldest"] is None, r["oldest"] or 0))
+    dated = [r["oldest"] for r in ahead_rows if r["oldest"]]
     return dict(checked=checked, dirty=dirty, unpushed=unpushed,
                 noremote=noremote, unmeasured=unmeasured, full_swept=swept,
                 note=ESTATE_NOTE, ahead=ahead_rows[:10],
+                oldest_unlanded=(min(dated) if dated else 0),
+                oldest_unlanded_repo=(ahead_rows[0]["repo"] if dated else ""),
+                age_unmeasurable=age_unmeasurable,
                 ahead_total=sum(r["n"] for r in ahead_rows),
                 ahead_repos=len(ahead_rows),
                 ahead_unmeasurable=ahead_unmeasurable)
@@ -629,6 +656,8 @@ def trend_values(board, tasks, estate, dage):
         "estate_risk": (None if not estate else
                         estate["dirty"] + estate["unpushed"] + estate["noremote"]),
         "ahead_total": None if not estate else estate["ahead_total"],
+        "unlanded_days": (None if not estate or not estate["oldest_unlanded"]
+                          else int((time.time() - estate["oldest_unlanded"]) / 86400)),
         "drafts_queued": (None if not dage or dage.get("count") is None
                           else dage["count"]),
     }
@@ -793,7 +822,7 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
 #strip { display:grid; gap:8px;
-         grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); }
+         grid-template-columns:repeat(auto-fit, minmax(128px, 1fr)); }
 .cell { background:var(--panel); border:1px solid var(--line);
         border-radius:var(--r); padding:8px 11px; min-width:0; }
 .cell .k { display:block; font-size:11px; letter-spacing:.14em;
@@ -1282,6 +1311,7 @@ function renderOrphans(s){
 const TREND_META = {
   lanes_waiting: { cell: "lanes",          of: "waiting",   goodUp: false },
   ahead_total:   { cell: "not on main",    of: "off main",  goodUp: false },
+  unlanded_days: { cell: "oldest unlanded", of: "days stranded", goodUp: false },
   tasks_done:    { cell: "tasks",          of: "done",      goodUp: true  },
   ctx_critical:  { cell: "ctx critical",   of: "ctx-critical", goodUp: false },
   estate_risk:   { cell: "estate at risk", of: "at risk",   goodUp: false },
@@ -1342,6 +1372,33 @@ function draftsCell(s){
   return ["oldest draft", "~/.zao/orca-drafts.json",
           `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
           `<b>${d.count}</b> queued${undated}`, "drafts_queued"];
+}
+
+/* How long the oldest thing off main has been sitting there. `not on main`
+   counts commits; 66 landed this morning and 3 stranded since July read the
+   same there and do not read the same here. */
+function unlandedCell(s){
+  const e = s.estate;
+  const src = "git log <base>..HEAD, last line";
+  if (!e) {
+    return ["oldest unlanded", "no worktree could be read",
+            `<b class="bad">unknown</b>`, "unlanded_days"];
+  }
+  const unm = e.age_unmeasurable
+    ? ` &middot; <b class="bad">${e.age_unmeasurable}</b> age unreadable` : "";
+  if (!e.ahead_total) {
+    return ["oldest unlanded", src, `<b class="nil">nothing off main</b>`,
+            "unlanded_days"];
+  }
+  if (!e.oldest_unlanded) {
+    return ["oldest unlanded", src,
+            `<b class="bad">age unknown</b>${unm}`, "unlanded_days"];
+  }
+  const age = Date.now()/1000 - e.oldest_unlanded;
+  const cls = age > 14*86400 ? "bad" : age > 3*86400 ? "flag" : "good";
+  return ["oldest unlanded", src,
+          `<b class="${cls}">${ago(age)}</b> &middot; ${esc(e.oldest_unlanded_repo)}${unm}`,
+          "unlanded_days"];
 }
 
 /* Work that has not reached main. Different question from `unpushed`: a
@@ -1424,7 +1481,8 @@ function strip(s){
     ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null],
     estateCell(s),
     draftsCell(s),
-    aheadCell(s)
+    aheadCell(s),
+    unlandedCell(s)
   ];
   document.getElementById("strip").innerHTML = cells.map(([k, src, v, tk]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
@@ -1461,7 +1519,11 @@ function sendDraft(id, el, held){
 function ago(sec){
   if (sec < 90) return Math.round(sec) + "s";
   if (sec < 5400) return Math.round(sec/60) + "m";
-  return (sec/3600).toFixed(1) + "h";
+  if (sec < 172800) return (sec/3600).toFixed(1) + "h";
+  // Past two days, hours stop being readable - "1403.4h" is a number nobody
+  // converts in their head. Found rendering a 58-day-old unlanded commit.
+  if (sec < 5184000) return Math.round(sec/86400) + "d";
+  return (sec/2592000).toFixed(1) + "mo";
 }
 function freshness(s){
   const at = new Date(s.ts*1000).toLocaleTimeString();
@@ -1532,7 +1594,9 @@ async function load(){
     : ((e.ahead || []).map(a => `
         <div class="task"><span class="st flag">${a.n}</span>
           <span>${esc(a.repo)}</span>
-          <span class="stamp">ahead of ${esc(a.base)}</span></div>`).join("")
+          <span class="stamp">${a.oldest
+            ? "oldest " + ago(Date.now()/1000 - a.oldest) + " &middot; "
+            : "age unreadable &middot; "}ahead of ${esc(a.base)}</span></div>`).join("")
        || '<span class="stamp">every live worktree is level with its default branch</span>')
       + (e.ahead_unmeasurable
          ? `<div class="stamp" style="margin-top:6px">${e.ahead_unmeasurable} `
@@ -1553,6 +1617,14 @@ async function load(){
      "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
      "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
      "so neither fact alone can tell quiet from dead."],
+    ["oldest unlanded", e
+      ? "the LAST line of git log &lt;base&gt;..HEAD --format=%ct per worktree. " +
+        "Not git log -1, which returns the NEWEST commit in the range - that " +
+        "answers when a lane last committed, which two other surfaces already " +
+        "answer. Lanes are listed oldest-first, because 3 commits stranded for " +
+        "a month matter more than 66 from this morning. A count that reads " +
+        "with an unreadable log is counted age-unreadable, not aged zero."
+      : "nothing could be read this refresh"],
     ["not on main", e
       ? "git rev-list --count &lt;base&gt;..HEAD per live worktree, where base is " +
         "the first of origin/HEAD, origin/main, origin/master, main, master " +
