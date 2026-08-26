@@ -241,82 +241,117 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   --r:10px;
   --gap:14px;
 }
+* { box-sizing:border-box; margin:0; }
 :focus-visible { outline:2px solid var(--gold); outline-offset:2px;
                  border-radius:4px; }
-* { box-sizing:border-box; margin:0; }
 body { background:var(--navy); color:var(--text);
-       font:15px/1.45 "SF Mono", ui-monospace, Menlo, monospace; padding:20px; }
+       font:15px/1.45 "SF Mono", ui-monospace, Menlo, monospace; padding:20px;
+       max-width:1180px; margin:0 auto; }
+header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
+         border-left:3px solid transparent; padding-left:10px;
+         margin:0 0 4px -13px; }
+header.warn { border-left-color:var(--gold); }
 h1 { font-size:20px; letter-spacing:.14em; color:var(--gold); }
 h1 small { color:var(--dim); letter-spacing:0; font-size:12px; margin-left:12px; }
 h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
      color:var(--dim); margin:26px 0 10px; }
-.grid { display:grid; grid-template-columns:1fr 1fr; gap:26px; }
-@media (max-width:980px){ .grid{grid-template-columns:1fr} }
-.card { background:var(--panel); border:1px solid var(--line);
-        border-radius:var(--r); padding:14px 16px; margin-bottom:10px; }
-.card[onclick] { border-color:var(--line-interactive); }
-.card[onclick]:hover { background:var(--panel-raised); }
-.gate { border-left:3px solid var(--gold); }
-.gate .q { margin-bottom:10px; }
-.gate button, .gate input[type=text] {
-  font:inherit; margin:3px 6px 3px 0; padding:6px 12px; border-radius:7px;
-  border:1px solid var(--line-interactive); background:var(--navy);
-  color:var(--text); cursor:pointer; }
-.gate button:hover { border-color:var(--gold); color:var(--gold); }
-.gate input[type=text] { width:58%; cursor:text; }
-.pane { display:flex; gap:12px; align-items:baseline; cursor:pointer; }
-.pane:hover .repo { color:var(--gold); }
-.repo { min-width:170px; font-weight:600; }
-.state { min-width:120px; color:var(--dim); }
-.state.hot { color:var(--warn); }
-.state.q { color:var(--gold); }
-.ctx { min-width:60px; color:var(--dim); }
-.detail { color:var(--dim); font-size:13px; overflow:hidden;
-          text-overflow:ellipsis; white-space:nowrap; }
-.task { display:flex; gap:12px; padding:3px 0; }
-.task .st { min-width:100px; }
-.st-completed{color:var(--ok)} .st-ready{color:var(--gold)}
-.st-blocked{color:var(--warn)} .st-dispatched{color:var(--info)}
-.st-pending{color:var(--dim)}
-#toast { position:fixed; bottom:22px; right:22px; background:var(--gold);
-         color:var(--navy); padding:10px 16px; border-radius:8px;
-         font-weight:700; display:none; z-index:9; }
-#toast.bad { background:var(--warn); color:var(--navy); }
-.stamp { color:var(--dim); font-size:12px; }
-header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
-         border-left:3px solid transparent; padding-left:10px; margin-left:-13px; }
-header.warn { border-left-color:var(--gold); }
 #freshness { font-size:13px; }
 #freshness .fresh { color:var(--ok); }
 #freshness .aging { color:var(--dim); }
 #freshness .stale { color:var(--gold); font-weight:700; }
 #freshness .at { color:var(--dim); margin-left:8px; }
+
+/* rail 1 - the only thing that may claim your attention */
+#needsyou { border-left:3px solid var(--gold); padding-left:14px;
+            margin:18px 0 0 -17px; }
+#needsyou h2 { color:var(--gold); font-size:15px; letter-spacing:.10em;
+               margin-top:14px; }
+#needsyou.clear { border-left-color:var(--line); }
+#needsyou.clear h2 { color:var(--dim); }
+
+.card { background:var(--panel); border:1px solid var(--line);
+        border-radius:var(--r); padding:14px 16px; margin-bottom:10px; }
+.card[onclick] { border-color:var(--line-interactive); cursor:pointer; }
+.card[onclick]:hover { background:var(--panel-raised); }
+.gate { border-left:3px solid var(--gold); }
+.gate.held { border-left-color:var(--warn); }
+.gate .q { margin-bottom:10px; }
+button, .gate input[type=text] {
+  font:inherit; margin:3px 6px 3px 0; padding:6px 12px; border-radius:7px;
+  border:1px solid var(--line-interactive); background:var(--navy);
+  color:var(--text); cursor:pointer; min-height:34px; }
+button:hover { border-color:var(--gold); color:var(--gold); }
+button[disabled] { opacity:.55; cursor:default; }
+.gate input[type=text] { width:58%; cursor:text; }
+
+/* rail 2 - the wall */
+.pane { display:flex; gap:12px; align-items:baseline; padding:9px 14px; }
+.pane:hover .repo { color:var(--gold); }
+.repo { min-width:170px; font-weight:600; }
+.chip { display:inline-block; min-width:118px; padding:1px 8px;
+        border-radius:5px; border-left:3px solid var(--line);
+        background:transparent; font-size:13px; color:var(--dim); }
+.r0 { border-left-color:var(--warn); color:var(--warn); }
+.r1, .r2 { border-left-color:var(--gold); color:var(--gold); }
+.r3, .r4 { border-left-color:var(--ok); color:var(--ok); }
+.r5 { border-left-color:var(--gold); color:var(--gold); }
+.r6 { border-left-color:var(--line-interactive); color:var(--dim); }
+.ctx { min-width:104px; color:var(--dim); font-size:13px; }
+.ctx.hot { color:var(--warn); }
+.detail { color:var(--dim); font-size:13px; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+#wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
+#wallsummary .idle { color:var(--gold); }
+
+/* rail 3 - reference, folded away */
+#ref { margin-top:30px; border-top:1px solid var(--line); padding-top:8px; }
+#ref summary { color:var(--dim); font-size:13px; cursor:pointer;
+               padding:8px 0; }
+#ref summary:hover { color:var(--gold); }
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:26px; }
+@media (max-width:980px){ .grid{grid-template-columns:1fr} }
+.task { display:flex; gap:12px; padding:3px 0; }
+.task .st { min-width:100px; }
+.st-completed{color:var(--ok)} .st-ready{color:var(--gold)}
+.st-blocked{color:var(--warn)} .st-dispatched{color:var(--info)}
+.st-pending{color:var(--dim)}
+.stamp { color:var(--dim); font-size:12px; }
+#toast { position:fixed; bottom:22px; right:22px; background:var(--gold);
+         color:var(--navy); padding:10px 16px; border-radius:8px;
+         font-weight:700; display:none; z-index:9; }
+#toast.bad { background:var(--warn); color:var(--navy); }
 </style></head><body>
 <header id="head">
  <h1>ZORCA <small id="run"></small></h1>
  <div id="freshness"></div>
 </header>
-<div class="grid">
- <div>
-  <h2>Gates - your calls <span id="gcount"></span></h2>
-  <div id="gates"></div>
-  <h2>Tasks</h2>
-  <div class="card" id="tasks"></div>
+
+<section id="needsyou">
+ <h2><span id="needcount"></span></h2>
+ <div id="gates"></div>
+ <div id="drafts"></div>
+ <div id="hotpanes"></div>
+</section>
+
+<section id="wall">
+ <h2>The wall <span class="stamp" id="wallsummary"></span></h2>
+ <div id="panes"></div>
+</section>
+
+<details id="ref">
+ <summary>Tasks, resolved gates, parked lanes, watcher trail</summary>
+ <div class="grid">
+  <div><h2>Tasks</h2><div class="card" id="tasks"></div></div>
+  <div>
+   <h2>Recently resolved</h2><div class="card" id="resolved"></div>
+   <h2>Parked lanes - tap to reopen</h2><div class="card" id="lanes"></div>
+   <h2>Watcher trail</h2>
+   <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
+     max-height:220px;overflow-y:auto"></div>
+   <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
+  </div>
  </div>
- <div>
-  <h2>Panes</h2>
-  <div id="panes"></div>
-  <h2>Drafts awaiting your tap <span id="dcount"></span></h2>
-  <div id="drafts"></div>
-  <h2>Recently resolved</h2>
-  <div class="card" id="resolved"></div>
-  <h2>Parked lanes - tap to reopen</h2>
-  <div class="card" id="lanes"></div>
-  <h2>Watcher trail</h2>
-  <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
-    max-height:220px;overflow-y:auto"></div>
- </div>
-</div>
+</details>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
 const INFLIGHT = new Set();
@@ -345,6 +380,7 @@ function toast(msg, ok){
   t.style.display = "block";
   setTimeout(()=>t.style.display="none", ok ? 1800 : 4000);
 }
+function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
 function ago(sec){
   if (sec < 90) return Math.round(sec) + "s";
   if (sec < 5400) return Math.round(sec/60) + "m";
@@ -362,17 +398,38 @@ function freshness(s){
     (cls === "fresh" ? `<span class="at">${esc(at)}</span>` : "");
   document.getElementById("head").classList.toggle("warn", cls === "stale");
 }
-function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+
+/* A pane row. The state string is always rendered as text - the chip colour
+   is the redundant channel, never the only one. */
+function paneRow(p){
+  const hot = p.ctx != null && p.ctx >= 85;
+  const ctx = p.ctx == null ? "-"
+            : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
+  return `<div class="card pane" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
+      <span class="repo">${esc(p.repo)}</span>
+      <span class="chip r${p.rank}">${esc(p.state)}</span>
+      <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
+      <span class="detail">${esc(p.question || p.tail || "")}</span>
+    </div>`;
+}
+
 async function load(){
   const s = await (await fetch("/api/state")).json();
   document.getElementById("run").textContent = s.run;
   freshness(s);
-  document.getElementById("gcount").textContent = "("+s.gates.length+")";
+
+  /* --- rail 1: gates, drafts, and only the panes that asked you ------ */
+  const hot = s.panes.filter(p => p.rank <= 2);
+  const need = s.gates.length + s.drafts.length + hot.length;
+  document.getElementById("needcount").textContent =
+    need === 0 ? "0 need you - the wall is working" : need + " need you";
+  document.getElementById("needsyou").classList.toggle("clear", need === 0);
+
   document.getElementById("gates").innerHTML = s.gates.map(g => `
     <div class="card gate">
       <div class="q" style="white-space:pre-wrap">${esc(g.question)}</div>
       <div class="stamp" style="margin-bottom:8px">filed ${esc(g.created_at||"")}
-        · task ${esc(g.task_id||"")}</div>
+        &middot; task ${esc(g.task_id||"")}</div>
       <div>
         ${g.options.map(o=>`<button onclick='post("/api/resolve",
           {id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("")}
@@ -383,14 +440,35 @@ async function load(){
         <button onclick='post("/api/resolve",{id:"${g.id}",
           resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>
       </div>
-    </div>`).join("") || '<div class="card">nothing needs you</div>';
-  document.getElementById("panes").innerHTML = s.panes.map(p => `
-    <div class="card pane" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
-      <span class="repo">${esc(p.repo)}</span>
-      <span class="state ${p.state=="ctx-critical"?"hot":(p.rank<=2?"q":"")}">${p.state}</span>
-      <span class="ctx">${p.ctx==null?"-":p.ctx+"%"}</span>
-      <span class="detail">${esc(p.question||p.tail||"")}</span>
-    </div>`).join("") || '<div class="card">no live panes</div>';
+    </div>`).join("");
+
+  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
+    <div class="card gate">
+      <div class="q"><b>${esc(d.repo)}</b>
+        <span class="stamp">${esc(d.reason)}</span></div>
+      <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"}, this)'>Send</button>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>
+    </div>`).join("");
+
+  document.getElementById("hotpanes").innerHTML = hot.map(paneRow).join("");
+
+  /* --- rail 2: the wall. Free and finished lanes collapse into the
+         summary; a card here means a lane that is actually running. --- */
+  const live = s.panes.filter(p => p.rank <= 4);
+  const working = s.panes.filter(p => p.rank == 3 || p.rank == 4).length;
+  const free = s.panes.filter(p => p.rank == 6).length;
+  const idle = s.panes.filter(p => p.rank == 5).length;
+  document.getElementById("wallsummary").innerHTML =
+    `${working} working &middot; ${free} free &middot; ` +
+    `<span class="${idle ? "idle" : ""}">${idle} idle</span>`;
+  document.getElementById("panes").innerHTML =
+    live.map(paneRow).join("") || '<div class="card">no live panes</div>';
+  document.getElementById("coldpanes").innerHTML =
+    s.panes.filter(p => p.rank >= 5).map(paneRow).join("")
+    || '<span class="stamp">none</span>';
+
+  /* --- rail 3: reference ------------------------------------------- */
   document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
     <div class="task" style="cursor:pointer" onclick='
       const el=document.getElementById("spec-"+${i});
@@ -399,26 +477,15 @@ async function load(){
       <span>${esc(t.title)}</span></div>
     <div id="spec-${i}" style="display:none" class="detail"
       ><div style="white-space:normal;padding:4px 0 10px 112px">
-      ${esc(t.spec)}<br><span class="stamp">${t.id} · ${esc(t.updated)}</span>
+      ${esc(t.spec)}<br><span class="stamp">${t.id} &middot; ${esc(t.updated)}</span>
       </div></div>`).join("");
-  document.getElementById("dcount").textContent = "("+s.drafts.length+")";
-  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
-    <div class="card gate">
-      <div class="q"><b>${esc(d.repo)}</b>
-        <span class="stamp">${esc(d.reason)}</span></div>
-      <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"}, this)'>Send</button>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>
-    </div>`).join("") || '<div class="card">queue empty</div>';
   document.getElementById("resolved").innerHTML = s.resolved.map(g => `
     <div class="task"><span class="st st-completed">resolved</span>
-      <span>${esc(g.question.slice(0,70))} → <b>${esc(g.resolution||"")}</b></span>
+      <span>${esc(g.question.slice(0,70))} &rarr; <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
-    <div class="task"><button style="font:inherit;padding:2px 10px;
-      border-radius:6px;border:1px solid var(--line);background:var(--navy);
-      color:var(--gold);cursor:pointer"
-      onclick='post("/api/lane",{i:${i}}, this)'>open</button>
+    <div class="task"><button onclick='post("/api/lane",{i:${i}}, this)'
+      style="color:var(--gold);padding:2px 10px;min-height:0">open</button>
       <span>${esc(l.name)}</span>
       <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
