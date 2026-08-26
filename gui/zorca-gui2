@@ -41,7 +41,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
-         "orphan_total": 0, "estate": None}
+         "orphan_total": 0, "estate": None, "drafts_age": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -476,6 +476,43 @@ def estate_sweep(cwds):
                 note=ESTATE_NOTE)
 
 
+def drafts_age(now=None):
+    """How long the oldest queued draft has been waiting for a tap.
+
+    queue_read() returns [] on any failure, which cannot tell an empty queue
+    from an unreadable one - the same collapse sh() made. This reads the file
+    itself so "nothing is waiting" and "we could not look" stay different
+    answers.
+
+    A draft with no usable ts is counted `undated` and never assumed fresh.
+    The watcher has always written ts, but a hand-edited queue is exactly the
+    case where a guessed age would be wrong and confident.
+    """
+    now = now or time.time()
+    if not os.path.exists(QUEUE):
+        return dict(state="empty", count=0, oldest=0, undated=0)
+    try:
+        items = json.load(open(QUEUE))
+        if not isinstance(items, list):
+            raise ValueError("queue is not a list")
+    except Exception as e:
+        return dict(state="unreadable", count=None, oldest=0, undated=0,
+                    why="%s: %s" % (type(e).__name__, e))
+    oldest, undated = 0, 0
+    for i in items:
+        ts = (i or {}).get("ts")
+        try:
+            ts = float(ts)
+            if ts <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            undated += 1
+            continue
+        if oldest == 0 or ts < oldest:
+            oldest = ts
+    return dict(state="ok", count=len(items), oldest=oldest, undated=undated)
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -539,6 +576,7 @@ def refresh():
     stuck = stuck_lanes(board, gitmap, claims)
     orphans, orphan_total = inflight_orphans(board)
     estate = estate_sweep([p.get("cwd") for p in board])
+    dage = drafts_age()
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
@@ -546,7 +584,7 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
-                     orphans=orphans, orphan_total=orphan_total, estate=estate,
+                     orphans=orphans, orphan_total=orphan_total, estate=estate, drafts_age=dage,
                      run=runs[0][:120] if runs else "")
 
 
@@ -1102,6 +1140,31 @@ function renderOrphans(s){
     </div>`).join("");
 }
 
+/* How long the oldest queued draft has waited for a tap. "none queued" and
+   "we could not read the queue" are different answers and stay different. */
+function draftsCell(s){
+  const d = s.drafts_age;
+  if (!d || d.state === "unreadable") {
+    return ["oldest draft", "~/.zao/orca-drafts.json unreadable",
+            `<b class="bad">unknown</b>`];
+  }
+  if (!d.count) {
+    return ["oldest draft", "~/.zao/orca-drafts.json",
+            `<b class="nil">none queued</b>`];
+  }
+  const undated = d.undated
+    ? ` &middot; <b class="bad">${d.undated}</b> undated` : "";
+  if (!d.oldest) {
+    return ["oldest draft", "~/.zao/orca-drafts.json",
+            `<b class="bad">age unknown</b> &middot; <b>${d.count}</b> queued`];
+  }
+  const age = Date.now()/1000 - d.oldest;
+  const cls = age > 21600 ? "bad" : age > 3600 ? "flag" : "good";
+  return ["oldest draft", "~/.zao/orca-drafts.json",
+          `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
+          `<b>${d.count}</b> queued${undated}`];
+}
+
 /* Work at risk across the live worktrees. Never a reassuring zero when the
    measurement failed - `unknown` is a real answer and a guessed 0 is not. */
 function estateCell(s){
@@ -1149,7 +1212,8 @@ function strip(s){
     ["ctx critical", "orca-board, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
       (critical ? " needs a handoff" : " - none near full")],
     ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`],
-    estateCell(s)
+    estateCell(s),
+    draftsCell(s)
   ];
   document.getElementById("strip").innerHTML = cells.map(([k, src, v]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
@@ -1271,8 +1335,11 @@ async function load(){
           esc(e.note) : ". No full-sweep date found in " + esc(e.note))
       : "nothing could be read this refresh - the cell says unknown rather " +
         "than a reassuring zero"],
-    ["gates, drafts, resolved",
-     "orca orchestration gate-list --json and ~/.zao/orca-drafts.json"],
+    ["gates, drafts, oldest draft",
+     "orca orchestration gate-list --json, and ~/.zao/orca-drafts.json read " +
+     "directly rather than through queue_read(), which returns [] on failure " +
+     "and cannot tell an empty queue from an unreadable one. A draft with no " +
+     "usable ts is counted undated, never assumed fresh."],
     ["since you last looked",
      "~/zao-vault/daily/&lt;today&gt;.md headings, and git -C &lt;worktree&gt; log -1 " +
      "per live pane. NEW marks come from localStorage on this browser only."],
