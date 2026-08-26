@@ -15,6 +15,7 @@ redistributes the app.
 |---|---|
 | `bin/orca-board` | Ranked board of every live pane (`ctx-critical` > `choice-prompt` > `asked-question` > `waiting` > `idle-done` > `bare-shell`). `--auto` drafts and sends next steps to stalled panes; `--draft` dry-runs; `--tail <repo>` follows one pane; `--json` for machines. |
 | `bin/repo-cleanup` | Estate auditor: uncommitted vs unbacked vs stray work, duplicate clones, archive candidates, license gaps. Every mutating subcommand is dry-run without `--apply`. |
+| `docs/DESIGN-bridge.md` | **Proposed, not built.** Design for a Telegram/Discord front end onto the ZORCA GUI API: why the actuator is Mac-forced, why reads come from the orchestration DB and writes only from `:7777`, the command surface, and a 5-stage build plan. |
 | `PLAYBOOK.md` | The operating conventions: one pane per lane, ctx>85% means handoff, file ownership between panes, the hazards that actually happened and the rules they produced. |
 
 ## The safety rails (each one bought with a real failure)
