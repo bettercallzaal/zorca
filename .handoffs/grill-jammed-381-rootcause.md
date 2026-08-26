@@ -95,7 +95,58 @@ will drift a third time.
 Applied against the live store this returns 140, and the bar reads
 `grill 140/200 NEARING` - true, and able to fall.
 
-**Not applied. Reporting first, as asked.**
+**Superseded - and the string compare was wrong.** The fix landed as
+`zaal-dotfiles a979b96` at 13:06, authored by Zaal, before this lane was
+told to apply it. It parses the value instead of sorting it, and the commit
+carries the reason my one-liner should not have shipped:
+
+> A string compare looks exact - `at` really is ISO-8601 UTC - but it gets
+> the safe-error path wrong in both directions: "not-a-date" sorts ABOVE the
+> cutoff and counts by ASCII accident, while "0000-bad" sorts below it and is
+> silently dropped. Same class of garbage, opposite answers, and one of them
+> loses a card from the count.
+
+The shipped version:
+
+```python
+def inwindow(v, now, w=12*3600):
+    try:
+        t=calendar.timegm(time.strptime(str(v)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return True
+    return now-t < w
+```
+
+That is the gate's rule exactly - cannot date it, count it. `~/bin/zao-status-refresh`
+is byte-identical to `a979b96:bin/zao-status-refresh`; nothing was applied by
+this lane.
+
+## Verified after the fix, 2026-08-26 20:55 UTC
+
+```
+cache before   grill 200  queued 380
+zao-status-refresh  exit 0
+cache after    grill 200  queued 380  err_vps 0
+bar renders    grill JAMMED 200 open/380 queued quiet 2h
+```
+
+**The two numbers are now different quantities, which is the proof the window
+clause is live** - before the fix `grill` and `grill_queued` both read 381.
+
+The bar does not read `140/200 NEARING`, and it should not. 140 was the
+windowed count at 15:39 UTC. Five more hours of sending took it to 200, and
+on the VPS right now:
+
+```
+windowed outstanding 200      <- at the deployed ceiling
+lifetime unanswered  380
+lastSentMs           18:02 UTC     now 20:55 UTC   -> 2h53m of silence
+```
+
+So the grill **is** jammed now, genuinely, for the first time in this
+investigation - and the bar is saying so truthfully instead of by accident.
+The cause is the open item below: nothing has been answered since Aug 24, so
+the windowed count climbed to the cap and the gate stopped.
 
 ## The thing that is actually wrong, and the bar is not saying it
 
