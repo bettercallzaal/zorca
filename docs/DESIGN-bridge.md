@@ -353,6 +353,18 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
+6. **ONE INSTRUCTION IS UNREAD.** A mid-turn message arrived head-truncated,
+   surviving only as *"e delete call stay Zaal's - do not touch either."* It
+   names **two** things as Zaal's and only the second is legible. The head has
+   **not** been reconstructed and nothing has been inferred from it - a
+   truncated instruction is not an instruction, and guessing at a sentence
+   whose subject is a delete call is exactly the wrong place to guess.
+   **Nothing has been pushed and nothing has been deleted.** Every commit on
+   this branch is local; `origin` is untouched and still sits at the commit it
+   held before this lane started. A resend has been
+   requested with the constraint placed at the tail, which is where this
+   channel reliably preserves it. The commits stay local until the message is
+   whole.
 
 Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md,
 `ZAOcowork` `docs/BOT-API.md`, ZAOOS `bot/src/lib/cowork.ts`
