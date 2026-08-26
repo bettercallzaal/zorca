@@ -37,11 +37,18 @@ PORT = 7778
 
 # State cache: pane scraping costs ~1s per pane, so refresh in the
 # background and serve the cache instantly.
+ACKS = os.environ.get("ZORCA_ACKS",
+                      os.path.expanduser("~/.zao/zorca-acks.json"))
+# An ack is a statement about a moment. Past this it is shown as stale
+# rather than trusted forever.
+ACK_STALE_S = int(os.environ.get("ZORCA_ACK_STALE_S", str(7 * 86400)))
+
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
-         "orphan_total": 0, "estate": None, "drafts_age": None, "trend": []}
+         "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
+         "acks": {}, "ack_stale_s": ACK_STALE_S}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -316,6 +323,7 @@ def stuck_lanes(board, gitmap, claims, now=None):
         if last["ts"] > since:
             continue
         out.append(dict(repo=p.get("repo") or "?", handle=p.get("handle"),
+                        key="stuck:%s:%d" % (p.get("handle"), int(since)),
                         state=p.get("state"), held=int(held),
                         assumed=bool(c.get("assumed")),
                         last_ts=last["ts"], last_sha=last["sha"],
@@ -393,6 +401,7 @@ def inflight_orphans(board, now=None, n=8):
         r = dict(r)
         r["age_days"] = int((now - r["ts"]) / 86400) if r["ts"] else None
         r["src"] = "no live pane matching \"%s\"" % r["lane"]
+        r["key"] = "orphan:%s:%s" % (r["lane"], r["when"])
         out.append(r)
     # Oldest claim first - the longer a row outlives its lane, the more
     # confidently the next lane will believe it.
@@ -508,7 +517,8 @@ def estate_sweep(cwds):
             if oldest_ts is None:
                 age_unmeasurable += 1
             ahead_rows.append(dict(repo=os.path.basename(cwd), n=n_ahead,
-                                   base=base, cwd=cwd, oldest=oldest_ts))
+                                   base=base, cwd=cwd, oldest=oldest_ts,
+                                   key="unlanded:%s:%s" % (cwd, oldest_ts or 0)))
         rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", "@{u}..HEAD"])
         if rc2 != 0:
             # No upstream at all: the branch exists only on this disk.
@@ -663,6 +673,35 @@ def trend_values(board, tasks, estate, dage):
     }
 
 
+def acks_read():
+    try:
+        d = json.load(open(ACKS))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def acks_write(d):
+    """Never prunes on absence.
+
+    A key missing from this refresh may be a transient scrape failure rather
+    than a resolved item, and dropping the ack then would resurrect it as
+    unhandled the moment the scrape recovered. Keys embed the fact they
+    describe, so a changed fact makes a new key and the old one ages out on
+    time alone.
+    """
+    cutoff = time.time() - 90 * 86400
+    d = {k: v for k, v in d.items() if isinstance(v, (int, float)) and v > cutoff}
+    try:
+        tmp = ACKS + ".tmp"
+        os.makedirs(os.path.dirname(ACKS), exist_ok=True)
+        json.dump(d, open(tmp, "w"), indent=1)
+        os.replace(tmp, ACKS)
+    except Exception:
+        pass
+    return d
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -736,7 +775,9 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
-                     orphans=orphans, orphan_total=orphan_total, estate=estate, drafts_age=dage, trend=trend,
+                     orphans=orphans, orphan_total=orphan_total, estate=estate,
+                     drafts_age=dage, trend=trend, acks=acks_read(),
+                     ack_stale_s=ACK_STALE_S,
                      run=runs[0][:120] if runs else "")
 
 
@@ -951,6 +992,12 @@ h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
 .orph { border-left-color:var(--gold); cursor:default; }
 .orph:hover { background:var(--panel); }
 .orphage { color:var(--gold); font-size:13px; }
+.jam.acked { border-left-color:var(--line); opacity:.62; }
+.ackline { margin-top:7px; font-size:12px; color:var(--dim); }
+.ackline b { color:var(--dim); }
+.ackline .stale { color:var(--gold); }
+button.mini.ack { color:var(--dim); }
+button.mini.ack:hover { color:var(--gold); }
 
 /* rail 3 - reference, folded away */
 #ref { margin-top:30px; border-top:1px solid var(--line); padding-top:8px; }
@@ -1090,6 +1137,11 @@ function toast(msg, ok){
   setTimeout(()=>t.style.display="none", ok ? 1800 : 4000);
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+/* esc() leaves quotes alone, which is fine for text and NOT fine inside a
+   single-quoted onclick. Lane names come from a markdown table and worktree
+   paths come from disk; either can contain an apostrophe, and one would end
+   the attribute early. */
+function attr(s){ return esc(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;"); }
 
 /* ZORCA already holds danger-worded drafts on rail 1. The GUI was the one
    surface where that hold was invisible - this only renders it. No override
@@ -1253,14 +1305,49 @@ function actRow(a){
    "held" is measured by zorca watching the state change, so a pane first
    seen already working reports "at least" - a duration we did not observe
    is never reported as one we did. */
+/* An ack says "I know about this one, as of then". It is a statement about
+   a moment, so the moment is always shown and goes stale on its own - an ack
+   that has quietly covered an item for nine days is a different thing from
+   one made this morning, and the row says which.
+
+   Keys embed the fact they describe, so acking "stuck since 14:02" does not
+   cover "stuck since 16:40" - a fresh claim makes a fresh key and the item
+   comes back unhandled. */
+function ackOf(s, key){
+  const at = (s.acks || {})[key];
+  return typeof at === "number" ? at : null;
+}
+function unhandled(s, rows){
+  return (rows || []).filter(r => !ackOf(s, r.key));
+}
+function ackBar(s, key){
+  const at = ackOf(s, key);
+  const k = attr(JSON.stringify(key));
+  if (!at) {
+    return `<div class="ackline"><button class="mini ack"
+      onclick='post("/api/ack",{key:${k},action:"ack"}, this)'
+      >I know about this</button></div>`;
+  }
+  const age = Date.now()/1000 - at;
+  const stale = age > (s.ack_stale_s || 604800);
+  return `<div class="ackline">acked <b class="${stale ? "stale" : ""}">${ago(age)} ago</b>` +
+    (stale ? " - and still here" : "") +
+    ` <button class="mini ack"
+      onclick='post("/api/ack",{key:${k},action:"unack"}, this)'>unack</button></div>`;
+}
+
 function renderStuck(s){
-  const rows = s.stuck || [];
-  document.getElementById("stuckcount").textContent = rows.length === 0
-    ? "nothing stuck - every working lane has landed something since it started"
-    : rows.length + " claiming to work with nothing landed";
+  const all = s.stuck || [];
+  const rows = unhandled(s, all), ackedN = all.length - rows.length;
+  const ordered = rows.concat(all.filter(r => ackOf(s, r.key)));
+  document.getElementById("stuckcount").innerHTML = rows.length === 0
+    ? "nothing unhandled" + (ackedN ? ` - ${ackedN} acked` :
+        " - every working lane has landed something since it started")
+    : rows.length + " claiming to work with nothing landed"
+      + (ackedN ? ` &middot; ${ackedN} acked` : "");
   document.getElementById("stuck").classList.toggle("clear", rows.length === 0);
-  document.getElementById("jams").innerHTML = rows.map(r => `
-    <div class="jam" onclick='post("/api/focus",{handle:"${r.handle}"}, this)'>
+  document.getElementById("jams").innerHTML = ordered.map(r => `
+    <div class="jam${ackOf(s, r.key) ? " acked" : ""}">
       <div class="jamline">
         <span class="who">${esc(r.repo)}</span>
         <span class="chip r${r.state === "working" ? 4 : 3}">${esc(r.state)}</span>
@@ -1270,6 +1357,9 @@ function renderStuck(s){
         &middot; ${esc(r.last_sha)} ${esc(r.last_text)}</div>
       <span class="jamsrc">${esc(r.src)}${r.assumed
         ? " - first seen already in this state, so the real duration may be longer" : ""}</span>
+      <div><button class="mini" onclick='post("/api/focus",{handle:"${r.handle}"}, this)'
+        >open the pane</button></div>
+      ${ackBar(s, r.key)}
     </div>`).join("");
 }
 
@@ -1278,18 +1368,22 @@ function renderStuck(s){
    row, and a button that pretended otherwise would be lying about what it
    does. */
 function renderOrphans(s){
-  const rows = s.orphans || [], total = s.orphan_total || 0;
-  document.getElementById("orphcount").textContent = total === 0
+  const shown = s.orphans || [], total = s.orphan_total || 0;
+  const live = unhandled(s, shown), ackedN = shown.length - live.length;
+  const rows = live.concat(shown.filter(r => ackOf(s, r.key)));
+  document.getElementById("orphcount").innerHTML = total === 0
     ? "none - every IN-FLIGHT row has a live lane"
-    : total + " row" + (total === 1 ? "" : "s") + " claimed by a lane that is not running"
-      + (total > rows.length ? ", oldest " + rows.length + " shown" : "");
+    : (total - ackedN) + " unhandled of " + total
+      + " row" + (total === 1 ? "" : "s") + " claimed by a lane that is not running"
+      + (total > shown.length ? ", oldest " + shown.length + " shown" : "")
+      + (ackedN ? ` &middot; ${ackedN} acked here` : "");
   document.getElementById("orphsrc").textContent = total === 0 ? "" :
     "~/zao-vault/handoffs/IN-FLIGHT.md, newest row per lane. A lane counts as "
     + "live when its name and a pane's repo or worktree name contain one "
     + "another on their alphanumerics - fuzzy on purpose, because fractal "
     + "runs in ZAOfractal. Rows that say the lane closed are excluded.";
   document.getElementById("orphans").innerHTML = rows.map(r => `
-    <div class="jam orph">
+    <div class="jam orph${ackOf(s, r.key) ? " acked" : ""}">
       <div class="jamline">
         <span class="who">${esc(r.lane)}</span>
         <span class="orphage">${r.age_days === null
@@ -1298,6 +1392,7 @@ function renderOrphans(s){
       </div>
       <div class="jamlast">${esc(r.doing)}</div>
       <span class="jamsrc">${esc(r.src)}</span>
+      ${ackBar(s, r.key)}
     </div>`).join("");
 }
 
@@ -1394,10 +1489,23 @@ function unlandedCell(s){
     return ["oldest unlanded", src,
             `<b class="bad">age unknown</b>${unm}`, "unlanded_days"];
   }
-  const age = Date.now()/1000 - e.oldest_unlanded;
+  // The headline age is the oldest thing NOT yet accounted for. Acking the
+  // 58-day branch you parked on purpose promotes the next real one instead
+  // of hiding the whole surface.
+  const live = unhandled(s, e.ahead).filter(a => a.oldest);
+  const pick = live.length ? live[0] : null;
+  const acked = (e.ahead || []).length - unhandled(s, e.ahead).length;
+  if (!pick) {
+    return ["oldest unlanded", src,
+      `<b class="nil">nothing unacked</b>` +
+      (acked ? ` &middot; <b class="nil">${acked}</b> acked` : "") + unm,
+      "unlanded_days"];
+  }
+  const age = Date.now()/1000 - pick.oldest;
   const cls = age > 14*86400 ? "bad" : age > 3*86400 ? "flag" : "good";
+  const note = acked ? ` <span class="none">(oldest unacked)</span>` : "";
   return ["oldest unlanded", src,
-          `<b class="${cls}">${ago(age)}</b> &middot; ${esc(e.oldest_unlanded_repo)}${unm}`,
+          `<b class="${cls}">${ago(age)}</b> &middot; ${esc(pick.repo)}${note}${unm}`,
           "unlanded_days"];
 }
 
@@ -1416,9 +1524,11 @@ function aheadCell(s){
     return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
             `<b class="nil">0</b> commits off main${unm}`, "ahead_total"];
   }
+  const ackedN = (e.ahead || []).length - unhandled(s, e.ahead).length;
   return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
           `<b class="flag">${e.ahead_total}</b> commits across ` +
-          `<b>${e.ahead_repos}</b> lane${e.ahead_repos === 1 ? "" : "s"}${unm}`,
+          `<b>${e.ahead_repos}</b> lane${e.ahead_repos === 1 ? "" : "s"}${unm}` +
+          (ackedN ? ` &middot; <b class="nil">${ackedN}</b> acked` : ""),
           "ahead_total"];
 }
 
@@ -1449,7 +1559,9 @@ function strip(s){
   const n = r => P.filter(p => p.rank === r).length;
   const st = x => T.filter(t => t.status === x).length;
   const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
-  const stuck = (s.stuck || []).length;
+  const stuckAll = s.stuck || [];
+  const stuck = unhandled(s, stuckAll).length;
+  const stuckAcked = stuckAll.length - stuck;
   const e0 = s.estate, d0 = s.drafts_age;
   const trendNow = {
     lanes_waiting: P.length ? n(3) : null,
@@ -1471,7 +1583,8 @@ function strip(s){
       `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
       `<b class="nil">${n(6)}</b> free` +
-      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : ""),
+      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "") +
+      (stuckAcked ? ` &middot; <b class="nil">${stuckAcked}</b> acked` : ""),
       "lanes_waiting"],
     ["tasks", "orchestration.db", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
@@ -1591,12 +1704,15 @@ async function load(){
   const e = s.estate;
   document.getElementById("aheadlist").innerHTML = !e
     ? '<span class="stamp">no worktree could be read this refresh</span>'
-    : ((e.ahead || []).map(a => `
-        <div class="task"><span class="st flag">${a.n}</span>
+    : (((unhandled(s, e.ahead).concat((e.ahead || []).filter(a => ackOf(s, a.key))))).map(a => `
+        <div class="task ${ackOf(s, a.key) ? "acked" : ""}"
+          style="${ackOf(s, a.key) ? "opacity:.62" : ""}">
+          <span class="st flag">${a.n}</span>
           <span>${esc(a.repo)}</span>
           <span class="stamp">${a.oldest
             ? "oldest " + ago(Date.now()/1000 - a.oldest) + " &middot; "
-            : "age unreadable &middot; "}ahead of ${esc(a.base)}</span></div>`).join("")
+            : "age unreadable &middot; "}ahead of ${esc(a.base)}</span>
+          ${ackBar(s, a.key)}</div>`).join("")
        || '<span class="stamp">every live worktree is level with its default branch</span>')
       + (e.ahead_unmeasurable
          ? `<div class="stamp" style="margin-top:6px">${e.ahead_unmeasurable} `
@@ -1617,6 +1733,14 @@ async function load(){
      "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
      "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
      "so neither fact alone can tell quiet from dead."],
+    ["acknowledge marks", "POST /api/ack writes ~/.zao/zorca-acks.json and " +
+      "nothing else - it shells out to nothing and sends nothing to any pane. " +
+      "Counts on stuck, orphans and unlanded read UNHANDLED; the raw totals " +
+      "stay raw, because those are measurements of the estate rather than a " +
+      "queue, and the trend lines follow the raw measurement so an ack can " +
+      "never manufacture a direction. Keys embed the fact - a fresh claim or " +
+      "a new oldest commit makes a new key and the item returns unhandled. An " +
+      "ack older than 7 days renders stale."],
     ["oldest unlanded", e
       ? "the LAST line of git log &lt;base&gt;..HEAD --format=%ct per worktree. " +
         "Not git log -1, which returns the NEWEST commit in the range - that " +
@@ -1776,6 +1900,23 @@ class H(BaseHTTPRequestHandler):
                 pass
             threading.Thread(target=refresh, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
+        elif self.path == "/api/ack" and body.get("key"):
+            # SPEC 2420 put new mutation endpoints out of scope. That guard
+            # was about mutations that REACH ORCA - resolve, send, focus,
+            # create - which are irreversible and outward-facing. This one
+            # writes a single zorca-owned file, shells out to nothing, sends
+            # nothing to any pane, and is undone by tapping again. The
+            # alternative, localStorage, would give the phone and the laptop
+            # different counts for the same board, which is worse than the
+            # deviation.
+            d = acks_read()
+            if body.get("action") == "unack":
+                d.pop(body["key"], None)
+            else:
+                d[body["key"]] = time.time()
+            acks_write(d)
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/draft" and body.get("id"):
             item = next((i for i in queue_read() if i["id"] == body["id"]), None)
             ok = True
