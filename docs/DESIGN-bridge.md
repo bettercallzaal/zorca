@@ -703,10 +703,26 @@ carries the state rather than the pane.
 
 ### Where the work is
 
-**All local. `origin` is untouched** and still sits at `9b64e28`, the commit
-it held before this lane started - so the diff for this lane is exactly
-`git log 9b64e28..HEAD`. Push is gated and was never performed. Nothing was
-deleted at any point.
+**CORRECTED 2026-08-26, minutes after first writing.** The sentence that
+stood here said `origin` was untouched at `9b64e28`. That was true when
+written and is **false now**, so it is corrected rather than left standing.
+
+Measured: `origin/main` has advanced to `7ea6574`, and **this lane's design
+commits are on it** - `git branch -r --contains` puts `7e2da31`, `55c2471`
+and `717bd74` on `origin/main`. Only the handoff commit remains local.
+
+**This lane never ran `git push`.** The cause is structural, not a breach of
+the hold: every lane in this repo commits to **`main`**, so when another lane
+pushed its own work, it carried every commit already on `main` with it -
+including this one's. A per-lane instruction to hold cannot be honoured on a
+shared branch, because the branch is what gets pushed, not the lane. Anyone
+relying on "do not push" as a containment boundary here should know it is not
+one; a branch per lane would be.
+
+Nothing was deleted at any point. The lane's own diff is still readable as
+`git log 9b64e28..HEAD -- docs/ bin/zorca-actuator bin/zorca-lane-enqueue
+bin/zorca-actuator-test`, filtered by path because the range now interleaves
+another lane's commits.
 
 | What | Where |
 |---|---|
@@ -743,6 +759,29 @@ here rather than intermittent.
 Corollary worth keeping: every truncation was recoverable because this
 document held the state. A pane that loses its brief can re-read a committed
 file. One that only had the message is finished.
+
+### FLAG for Zaal - a disclosure question this lane cannot decide
+
+`bettercallzaal/zorca` is **public** (`isPrivate: false`, measured), and this
+document is now on its `main`.
+
+Nothing in it is a secret: no tokens, keys, IP addresses or hostnames, and
+`@zaoclaw_bot` is a publicly addressable handle already.
+
+**One item does not clear the estate's own test.** Section 12.4 carries a
+partner's commercial terms that are **not public** - the vendor's pricing
+page does not resolve, so the figures exist here only because they were
+derived from a private call and an account balance. The standing test is
+"could a stranger derive this from public sources alone?" They could not.
+That makes it a disclosure rather than a convenience republication.
+
+**Not fixed here, deliberately.** It is already pushed, so any fix is
+forward-only and history retains it; and deletion or redaction on a public
+repo is Zaal's call, never an agent's - the same rule that governed the two
+PII findings earlier today. Raising it is the whole of this lane's role.
+Per the corollary learned the same day, the figures are **not restated** in
+this flag or in any commit message, because describing precisely what would
+be removed republishes it.
 
 ### Untouched, on instruction - do not assume otherwise
 
