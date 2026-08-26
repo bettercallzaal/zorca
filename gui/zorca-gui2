@@ -40,7 +40,8 @@ PORT = 7778
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
-         "daily": [], "gitlog": [], "stuck": []}
+         "daily": [], "gitlog": [], "stuck": [], "orphans": [],
+         "orphan_total": 0}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -325,6 +326,80 @@ def stuck_lanes(board, gitmap, claims, now=None):
     return out
 
 
+INFLIGHT = os.environ.get(
+    "ZORCA_INFLIGHT",
+    os.path.expanduser("~/zao-vault/handoffs/IN-FLIGHT.md"))
+
+
+def _norm(v):
+    return "".join(c for c in (v or "").lower() if c.isalnum())
+
+
+def inflight_orphans(board, now=None, n=8):
+    """IN-FLIGHT rows whose lane has no live pane - claims nobody is holding.
+
+    The file is the cross-lane map: `| lane | doing | claimed | when |`. A
+    row is a lane saying "I am on this". When the lane is gone and the row
+    is not, the claim outlives the work, and the next lane reads it as live.
+
+    Matching a lane name to a pane is fuzzy on purpose - `fractal` runs in
+    `ZAOfractal`, `meetings` in `zaomeetings` - so it is containment on the
+    alphanumerics of both. The rule is printed in the row's source line
+    rather than hidden, because a fuzzy match that claims to be exact is
+    worse than one that says what it did.
+
+    Dates are PARSED (a979b96). A row whose date will not parse is kept and
+    shown undated - never dropped, because a claim we cannot date is exactly
+    the kind that has been sitting longest.
+    """
+    now = now or time.time()
+    rows = []
+    try:
+        for ln in open(INFLIGHT):
+            if not ln.startswith("|"):
+                continue
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if len(cells) < 4 or cells[0].lower() == "lane" or set(cells[0]) <= set("- "):
+                continue
+            ts = 0
+            try:
+                ts = time.mktime(time.strptime(cells[3][:10], "%Y-%m-%d"))
+            except Exception:
+                ts = 0
+            rows.append(dict(lane=cells[0], doing=cells[1], when=cells[3], ts=ts))
+    except Exception:
+        return []
+    # One lane, many rows - the newest row is the lane's current claim.
+    newest = {}
+    for r in rows:
+        cur = newest.get(r["lane"])
+        if cur is None or r["ts"] > cur["ts"]:
+            newest[r["lane"]] = r
+    live = [_norm(p.get("repo")) for p in board if p.get("repo")]
+    live += [_norm(os.path.basename(p.get("cwd") or "")) for p in board if p.get("cwd")]
+    live = [x for x in live if x]
+    out = []
+    for r in newest.values():
+        lane = _norm(r["lane"])
+        if not lane:
+            continue
+        if any(lane in x or x in lane for x in live):
+            continue
+        # A row that says the lane closed is an accurate record, not an
+        # outliving claim. Counting it would make the surface cry wolf about
+        # the one kind of row that did its job.
+        if "lane closed" in r["doing"].lower():
+            continue
+        r = dict(r)
+        r["age_days"] = int((now - r["ts"]) / 86400) if r["ts"] else None
+        r["src"] = "no live pane matching \"%s\"" % r["lane"]
+        out.append(r)
+    # Oldest claim first - the longer a row outlives its lane, the more
+    # confidently the next lane will believe it.
+    out.sort(key=lambda r: (r["ts"] or 0))
+    return out[:n], len(out)
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -386,6 +461,7 @@ def refresh():
     gitmap = {g["cwd"]: g for g in gits}
     claims = claims_update(board)
     stuck = stuck_lanes(board, gitmap, claims)
+    orphans, orphan_total = inflight_orphans(board)
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
@@ -393,6 +469,7 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
+                     orphans=orphans, orphan_total=orphan_total,
                      run=runs[0][:120] if runs else "")
 
 
@@ -586,9 +663,16 @@ input[type=text] { width:58%; cursor:text; }
 .jam:hover { background:var(--panel-raised); }
 .jamline { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
 .jamwhy { color:var(--warn); font-size:13px; }
-.jamlast { color:var(--dim); font-size:13px; margin-top:5px; }
+.jamlast { color:var(--dim); font-size:13px; margin-top:5px;
+           display:-webkit-box; -webkit-line-clamp:2;
+           -webkit-box-orient:vertical; overflow:hidden; }
 .jamsrc { display:block; font-size:10px; color:var(--dim); opacity:.75;
           margin-top:5px; line-height:1.3; }
+h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
+     color:var(--dim); font-weight:400; margin:20px 0 9px; }
+.orph { border-left-color:var(--gold); cursor:default; }
+.orph:hover { background:var(--panel); }
+.orphage { color:var(--gold); font-size:13px; }
 
 /* rail 3 - reference, folded away */
 #ref { margin-top:30px; border-top:1px solid var(--line); padding-top:8px; }
@@ -672,6 +756,9 @@ input[type=text] { width:58%; cursor:text; }
 <section id="stuck">
  <h2>Stuck <span class="stamp" id="stuckcount"></span></h2>
  <div id="jams"></div>
+ <h3>Claims outliving their lane <span class="stamp" id="orphcount"></span></h3>
+ <div class="jamsrc" id="orphsrc" style="margin:-4px 0 9px"></div>
+ <div id="orphans"></div>
 </section>
 
 <details id="ref">
@@ -765,7 +852,10 @@ function renderFeed(s){
     mark === 0 ? "first look on this browser - showing the latest"
     : fresh === 0 ? "nothing new since " + new Date(mark*1000).toLocaleTimeString()
     : fresh + " new since " + new Date(mark*1000).toLocaleTimeString();
-  const show = all.slice(0, window.innerWidth <= 720 ? 4 : 6);
+  // Three on a phone, not four. The stat cells grew when every one of them
+  // started naming its source, and the action list must stay above the fold
+  // (milestone 4). The feed is context; the decisions are the point.
+  const show = all.slice(0, window.innerWidth <= 720 ? 3 : 6);
   document.getElementById("feed").innerHTML = show.map(r => {
     const isNew = r.ts && r.ts > mark;
     const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
@@ -885,6 +975,34 @@ function renderStuck(s){
         &middot; ${esc(r.last_sha)} ${esc(r.last_text)}</div>
       <span class="jamsrc">${esc(r.src)}${r.assumed
         ? " - first seen already in this state, so the real duration may be longer" : ""}</span>
+    </div>`).join("");
+}
+
+/* An IN-FLIGHT row whose lane has no live pane. Not tappable: there is no
+   pane to focus and no safe edit to offer - the fix is a human closing the
+   row, and a button that pretended otherwise would be lying about what it
+   does. */
+function renderOrphans(s){
+  const rows = s.orphans || [], total = s.orphan_total || 0;
+  document.getElementById("orphcount").textContent = total === 0
+    ? "none - every IN-FLIGHT row has a live lane"
+    : total + " row" + (total === 1 ? "" : "s") + " claimed by a lane that is not running"
+      + (total > rows.length ? ", oldest " + rows.length + " shown" : "");
+  document.getElementById("orphsrc").textContent = total === 0 ? "" :
+    "~/zao-vault/handoffs/IN-FLIGHT.md, newest row per lane. A lane counts as "
+    + "live when its name and a pane's repo or worktree name contain one "
+    + "another on their alphanumerics - fuzzy on purpose, because fractal "
+    + "runs in ZAOfractal. Rows that say the lane closed are excluded.";
+  document.getElementById("orphans").innerHTML = rows.map(r => `
+    <div class="jam orph">
+      <div class="jamline">
+        <span class="who">${esc(r.lane)}</span>
+        <span class="orphage">${r.age_days === null
+          ? "date unreadable - shown anyway"
+          : r.age_days + "d since it was claimed"}</span>
+      </div>
+      <div class="jamlast">${esc(r.doing)}</div>
+      <span class="jamsrc">${esc(r.src)}</span>
     </div>`).join("");
 }
 
@@ -1019,6 +1137,7 @@ async function load(){
     live.map(p => paneRow(p, p.rank <= 2)).join("")
     || '<div class="card">no live panes</div>';
   renderStuck(s);
+  renderOrphans(s);
   document.getElementById("coldpanes").innerHTML =
     s.panes.filter(p => p.rank >= 5).map(paneRow).join("")
     || '<span class="stamp">none</span>';
