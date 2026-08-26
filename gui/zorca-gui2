@@ -41,7 +41,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
-         "orphan_total": 0}
+         "orphan_total": 0, "estate": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -400,6 +400,82 @@ def inflight_orphans(board, now=None, n=8):
     return out[:n], len(out)
 
 
+ESTATE_NOTE = os.environ.get(
+    "ZORCA_ESTATE_NOTE",
+    os.path.expanduser("~/zao-vault/notes/repo-estate.md"))
+
+
+def sh2(args, timeout=15):
+    """Like sh(), but the caller can tell failure from an empty result.
+
+    `git status --porcelain` returns "" for a clean tree AND sh() returns ""
+    for a crash. Collapsing those would report a repo that could not be read
+    as a repo with nothing to lose, which is the worst direction for this
+    number to be wrong in.
+    """
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except Exception:
+        return -1, ""
+
+
+def estate_sweep(cwds):
+    """Work at risk across the LIVE worktrees - measured, never estimated.
+
+    Scoped to the worktrees on the board rather than the whole mac: the full
+    estate is 48 local clones and sweeping them every 20s would cost more
+    than it tells you. This is the subset that is running right now, which is
+    where uncommitted work is actually being made.
+
+    Anything that cannot be read is counted as `unmeasured` and said out
+    loud. A repo we failed to read is not a repo with nothing at risk.
+    """
+    dirty = unpushed = noremote = unmeasured = 0
+    seen, checked = set(), 0
+    for cwd in cwds:
+        if not cwd or cwd in seen:
+            continue
+        seen.add(cwd)
+        if not os.path.isdir(cwd):
+            continue
+        checked += 1
+        rc, out = sh2(["git", "-C", cwd, "status", "--porcelain"])
+        if rc != 0:
+            unmeasured += 1
+            continue
+        if out.strip():
+            dirty += 1
+        rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", "@{u}..HEAD"])
+        if rc2 != 0:
+            # No upstream at all: the branch exists only on this disk.
+            noremote += 1
+            continue
+        try:
+            if int(out2.strip() or "0") > 0:
+                unpushed += 1
+        except ValueError:
+            unmeasured += 1
+    if not checked:
+        # A blank board is a scrape failure, not an estate with nothing in
+        # it. Say unknown rather than paint a reassuring zero.
+        return None
+    swept = ""
+    try:
+        for ln in open(ESTATE_NOTE):
+            if "Measured " in ln:
+                token = ln.split("Measured ", 1)[1].split()[0].strip("`.,")
+                # Parsed, not trusted as a string (a979b96).
+                time.strptime(token, "%Y-%m-%d")
+                swept = token
+                break
+    except Exception:
+        swept = ""
+    return dict(checked=checked, dirty=dirty, unpushed=unpushed,
+                noremote=noremote, unmeasured=unmeasured, full_swept=swept,
+                note=ESTATE_NOTE)
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -462,6 +538,7 @@ def refresh():
     claims = claims_update(board)
     stuck = stuck_lanes(board, gitmap, claims)
     orphans, orphan_total = inflight_orphans(board)
+    estate = estate_sweep([p.get("cwd") for p in board])
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
@@ -469,7 +546,7 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
-                     orphans=orphans, orphan_total=orphan_total,
+                     orphans=orphans, orphan_total=orphan_total, estate=estate,
                      run=runs[0][:120] if runs else "")
 
 
@@ -554,7 +631,8 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn.clear { border-color:var(--line); color:var(--dim); font-weight:400; }
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
-#strip { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+#strip { display:grid; gap:8px;
+         grid-template-columns:repeat(auto-fit, minmax(178px, 1fr)); }
 .cell { background:var(--panel); border:1px solid var(--line);
         border-radius:var(--r); padding:8px 11px; min-width:0; }
 .cell .k { display:block; font-size:11px; letter-spacing:.14em;
@@ -569,6 +647,14 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 
 /* what happened since you last looked - the feed, not the panes */
 #since { margin-top:22px; }
+#since > summary { cursor:pointer; list-style:none; padding:2px 0; }
+#since > summary::-webkit-details-marker { display:none; }
+#since > summary::before { content:"\25b8 "; color:var(--dim); }
+#since[open] > summary::before { content:"\25be "; }
+#since > summary:hover .sincehead { color:var(--gold); }
+.sincehead { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
+             color:var(--dim); }
+#feed { margin-top:10px; }
 .ev { display:flex; gap:8px 10px; align-items:baseline; flex-wrap:wrap;
       background:var(--panel); border:1px solid var(--line);
       border-left:3px solid var(--line); border-radius:var(--r);
@@ -738,10 +824,11 @@ h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
  <div id="strip"></div>
 </div>
 
-<section id="since">
- <h2>Since you last looked <span class="stamp" id="sincecount"></span></h2>
+<details id="since">
+ <summary><span class="sincehead">Since you last looked</span>
+   <span class="stamp" id="sincecount"></span></summary>
  <div id="feed"></div>
-</section>
+</details>
 
 <section id="needsyou">
  <h2>Do these in order</h2>
@@ -773,6 +860,8 @@ h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
    <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
+   <h2>Where these numbers live</h2>
+   <div class="card jamsrc" id="provenance" style="opacity:1"></div>
   </div>
  </div>
 </details>
@@ -855,7 +944,14 @@ function renderFeed(s){
   // Three on a phone, not four. The stat cells grew when every one of them
   // started naming its source, and the action list must stay above the fold
   // (milestone 4). The feed is context; the decisions are the point.
-  const show = all.slice(0, window.innerWidth <= 720 ? 3 : 6);
+  // On a phone the feed is prose, and prose above the action list is
+  // reading cost. The COUNT stays visible at the top - that is the stat -
+  // and the rows themselves sit one tap down, which is where reading
+  // belongs. A laptop has the room, so it stays open there.
+  const phone = window.innerWidth <= 720;
+  const el = document.getElementById("since");
+  if (el.dataset.userset !== "1") el.open = !phone;
+  const show = all.slice(0, phone ? 6 : 6);
   document.getElementById("feed").innerHTML = show.map(r => {
     const isNew = r.ts && r.ts > mark;
     const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
@@ -1006,6 +1102,24 @@ function renderOrphans(s){
     </div>`).join("");
 }
 
+/* Work at risk across the live worktrees. Never a reassuring zero when the
+   measurement failed - `unknown` is a real answer and a guessed 0 is not. */
+function estateCell(s){
+  const e = s.estate;
+  if (!e) {
+    return ["estate at risk", "no worktree could be read",
+            `<b class="bad">unknown</b>`];
+  }
+  const bit = (n, label, cls) =>
+    `<b class="${n ? cls : "nil"}">${n}</b> ${label}`;
+  const v = [bit(e.dirty, "dirty", "bad"),
+             bit(e.unpushed, "unpushed", "flag"),
+             bit(e.noremote, "no remote", "bad")]
+            .join(" &middot; ")
+            + (e.unmeasured ? ` &middot; <b class="bad">${e.unmeasured}</b> unreadable` : "");
+  return ["estate at risk", `git status, ${e.checked} live worktrees`, v];
+}
+
 /* The fleet, four numbers wide. A zero that should be zero renders dim; a
    number that means something is wrong renders warn or gold, so the strip
    is scannable without reading it. */
@@ -1024,19 +1138,18 @@ function strip(s){
     wcls = w > 300 ? "flag" : "good";
   }
   const cells = [
-    ["lanes", stuck
-        ? "orca-board --json; stuck = git log -1 vs ~/.zao/zorca-claims.json"
-        : "orca-board --json",
+    ["lanes", stuck ? "orca-board + zorca-claims.json" : "orca-board --json",
       `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
       `<b class="nil">${n(6)}</b> free` +
       (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "")],
-    ["tasks", "orchestration.db (read-only)", `<b class="good">${st("completed")}</b> done &middot; ` +
+    ["tasks", "orchestration.db", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
       `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
-    ["ctx critical", "orca-board --json, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
+    ["ctx critical", "orca-board, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
       (critical ? " needs a handoff" : " - none near full")],
-    ["watcher", "~/.zao/orca-board.log + pgrep", `<b class="${wcls}">${wtxt}</b>`]
+    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`],
+    estateCell(s)
   ];
   document.getElementById("strip").innerHTML = cells.map(([k, src, v]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
@@ -1136,6 +1249,36 @@ async function load(){
   document.getElementById("panes").innerHTML =
     live.map(p => paneRow(p, p.rank <= 2)).join("")
     || '<div class="card">no live panes</div>';
+  const e = s.estate;
+  document.getElementById("provenance").innerHTML = [
+    ["lanes, ctx critical, the wall",
+     "python3 ~/bin/orca-board --json - one scrape per refresh, ~1s per pane"],
+    ["stuck lanes",
+     "orca-board state observed over time in ~/.zao/zorca-claims.json, against " +
+     "git -C &lt;worktree&gt; log -1. 45 min threshold, ZORCA_STALE_CLAIM_S."],
+    ["tasks",
+     "~/Library/Application Support/orca/orchestration.db, opened read-only " +
+     "(file: URI, mode=ro) with a busy timeout"],
+    ["watcher",
+     "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
+     "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
+     "so neither fact alone can tell quiet from dead."],
+    ["estate at risk", e
+      ? "git status --porcelain and git rev-list --count @{u}..HEAD across the " +
+        (e.checked) + " live worktrees on the board - not the full 48-clone " +
+        "estate, which would cost more than it tells you every 20s" +
+        (e.full_swept ? ". Full estate last swept " + e.full_swept + " per " +
+          esc(e.note) : ". No full-sweep date found in " + esc(e.note))
+      : "nothing could be read this refresh - the cell says unknown rather " +
+        "than a reassuring zero"],
+    ["gates, drafts, resolved",
+     "orca orchestration gate-list --json and ~/.zao/orca-drafts.json"],
+    ["since you last looked",
+     "~/zao-vault/daily/&lt;today&gt;.md headings, and git -C &lt;worktree&gt; log -1 " +
+     "per live pane. NEW marks come from localStorage on this browser only."],
+    ["claims outliving their lane",
+     "~/zao-vault/handoffs/IN-FLIGHT.md, newest row per lane"],
+  ].map(([k, v]) => `<div style="margin-bottom:8px"><b>${k}</b><br>${v}</div>`).join("");
   renderStuck(s);
   renderOrphans(s);
   document.getElementById("coldpanes").innerHTML =
@@ -1191,6 +1334,10 @@ document.addEventListener("keydown", e => {
     const btn = row.querySelectorAll("button")[Number(e.key) - 1];
     if (btn) { btn.focus(); e.preventDefault(); }
   }
+});
+// Once Zaal opens or closes the feed himself, stop overriding him.
+document.getElementById("since").addEventListener("toggle", function(){
+  this.dataset.userset = "1";
 });
 load(); setInterval(load, 15000);
 </script></body></html>"""
