@@ -29,7 +29,7 @@ PORT = 7777
 # State cache: pane scraping costs ~1s per pane, so refresh in the
 # background and serve the cache instantly.
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
-         "drafts": [], "resolved": []}
+         "drafts": [], "resolved": [], "lanes": []}
 LOCK = threading.Lock()
 QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
 
@@ -77,6 +77,34 @@ def load_tasks(run_id):
     return rows
 
 
+MANIFEST = os.path.expanduser(
+    "~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md")
+
+
+def load_lanes():
+    """Parked lanes from the vault manifest: | Lane | `worktree` | `cmd` |"""
+    lanes = []
+    try:
+        for ln in open(MANIFEST):
+            if not ln.startswith("|") or "---" in ln or "Worktree" in ln:
+                continue
+            cells = [c.strip() for c in ln.strip("|\n").split("|")]
+            if len(cells) < 3:
+                continue
+            name = cells[0]
+            wt = cells[1].strip("`").replace("~", os.path.expanduser("~"))
+            m = cells[2]
+            cmd = ""
+            if "claude --resume" in m:
+                cmd = "claude --resume " + \
+                    m.split("claude --resume", 1)[1].strip("` ").split("`")[0].split(" - ")[0].strip()
+            if cmd and os.path.isdir(wt):
+                lanes.append(dict(name=name, worktree=wt, cmd=cmd))
+    except Exception:
+        pass
+    return lanes
+
+
 def current_run():
     """Terminal bindings die on every Orca restart; discover, never bind."""
     for ln in sh([ORCA, "orchestration", "run-list"]).splitlines():
@@ -104,7 +132,7 @@ def refresh():
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
                      gates=pending, resolved=resolved[-8:],
-                     drafts=queue_read(),
+                     drafts=queue_read(), lanes=load_lanes(),
                      run=runs[0][:120] if runs else "")
 
 
@@ -176,6 +204,8 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
   <div id="drafts"></div>
   <h2>Recently resolved</h2>
   <div class="card" id="resolved"></div>
+  <h2>Parked lanes - tap to reopen</h2>
+  <div class="card" id="lanes"></div>
  </div>
 </div>
 <div id="toast"></div>
@@ -228,6 +258,14 @@ async function load(){
     <div class="task"><span class="st st-completed">resolved</span>
       <span>${esc(g.question.slice(0,70))} → <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
+  document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
+    <div class="task"><button style="font:inherit;padding:2px 10px;
+      border-radius:6px;border:1px solid var(--line);background:var(--navy);
+      color:var(--gold);cursor:pointer"
+      onclick='post("/api/lane",{i:${i}})'>open</button>
+      <span>${esc(l.name)}</span>
+      <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
+    </div>`).join("") || '<span class="stamp">no parked lanes</span>';
 }
 load(); setInterval(load, 15000);
 </script></body></html>"""
@@ -269,6 +307,22 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/focus" and body.get("handle"):
             sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
             self._send(200, '{"ok": true}')
+        elif self.path == "/api/lane" and body.get("i") is not None:
+            lanes = load_lanes()
+            ok = False
+            try:
+                l = lanes[int(body["i"])]
+                # Zaal's tap: open an Orca pane in the lane's worktree and
+                # resume its Claude session. Spawns a paid session - which is
+                # exactly what the button says it does.
+                out = sh([ORCA, "terminal", "create", "--worktree",
+                          "path:" + l["worktree"], "--title", l["name"],
+                          "--command", l["cmd"], "--focus"], timeout=120)
+                ok = "Created terminal" in out
+            except Exception:
+                pass
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/draft" and body.get("id"):
             item = next((i for i in queue_read() if i["id"] == body["id"]), None)
             ok = True
