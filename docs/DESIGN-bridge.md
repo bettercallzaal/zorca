@@ -25,7 +25,7 @@ rewriting:
 
 | Question | v1 said | Zaal's verdict | Consequence |
 |---|---|---|---|
-| Own bot or fold into ZOE? | leaned own bot, front end on the Mac | **Extend ZOE in place.** `@zaoclaw_bot` keeps its identity, audience and VPS deploy; v2 lands as versions. | **v1's core recommendation is dead.** The front end is on the VPS from day one. The transport hop v1 deferred to stage 4 is now stage 1's hardest part. |
+| Own bot or fold into ZOE? (v1's section 7; both branches now written up in **section 11**) | leaned own bot, front end on the Mac | **Extend ZOE in place.** `@zaoclaw_bot` keeps its identity, audience and VPS deploy; v2 lands as versions. | **v1's core recommendation is dead.** The front end is on the VPS from day one. The transport hop v1 deferred to stage 4 is now stage 1's hardest part. |
 | `/lane` at all? | flagged it as spending money on a lock-screen tap | **Yes, and bigger than v1 imagined.** Not "resume a parked lane" - `/lane <request>` creates a new planned lane through the orchestrator. Highest-value feature. | It is stage 1, and it unblocks the rest. The money concern does not disappear; it becomes a confirm step and a TTL (section 3.3). |
 | Telegram or Discord first? | open | not picked; recommendation requested | Section 6. |
 
@@ -338,6 +338,139 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
 2. Poll interval: 10s assumed above, not decided.
 3. Does `/lane` pick the repo, or does ZOE ask when the request is ambiguous?
    Asking is safer; it also costs a round trip on a phone.
+4. **Is the fold-into-ZOE verdict firm?** Section 1 records it as Zaal's,
+   relayed by the coordinator; a later relay asked for both branches
+   documented and repeated that the unsent prompt-line text is not an answer.
+   Both branches are now written up in **section 11**, which also states why
+   this lane did not resolve the tension itself.
+5. Does Telegram retain undelivered `getUpdates` for ~24h? Unverified, and it
+   is the measurement that most changes the branch comparison (section 11.3).
 
 Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md,
 `ZAOcowork` `docs/BOT-API.md`, ZAOOS `bot/src/lib/cowork.ts`
+
+## 11. Appendix A - the two branches, documented
+
+**Why this section exists, stated plainly.** Section 1 records "extend ZOE in
+place" as a Zaal verdict, relayed by the coordinator. A later orchestrator
+relay asked for both branches documented anyway, and repeated that the unsent
+prompt-line text is not an answer. Those two things are in tension: if the
+verdict is real, this section is contingency; if the verdict was contaminated
+by the unsent text - which read "fold it into ZOE, telegram first" and
+overlaps the verdict on exactly the ZOE half - then the question is open and
+section 1 is overstated.
+
+**This lane is not resolving that.** Section 1 stays as recorded, because
+un-deciding a relayed verdict on my own authority is the same error in the
+opposite direction. This section documents both branches so neither is lost,
+and Zaal owns the leap. Flagged in section 10.
+
+(Pointer for stale references: this was **v1's section 7**. In v2 that number
+is the OpenMatter slot.)
+
+### 11.1 The asymmetry that drives everything
+
+The two branches are not two skins on one design. They differ in **how many
+hosts sit between the phone and the pane**, and that number decides whether
+section 3 of this document is needed at all.
+
+| | **Branch A: fold into ZOE** | **Branch B: own bot** |
+|---|---|---|
+| Hosts in the path | 3 - phone, VPS, Mac | **2 - phone, Mac** |
+| Transport problem | the whole of section 3 | **does not exist** |
+| Queue, TTL, reaper | all required | **none required** |
+| Enqueue authz change | **required** (section 3.3 gap 1) | not required |
+| VPS hop | **stage 0/1** | stage 4, or never |
+| Latency | one poll interval | instant |
+| New identity | none | a second bot |
+| Phone apps for one loop | 3 | **4** |
+
+Branch B deletes sections 2, 3, and 3.3 outright. That is the single largest
+fact about this choice and it is easy to miss while reading a document that
+is mostly about a transport.
+
+### 11.2 Branch A - fold into ZOE (the recorded verdict)
+
+`@zaoclaw_bot` gains a `/lane` command. Identity, audience, token, systemd
+unit and deploy are unchanged; v2 lands as versions in ZAOOS `bot/src/`.
+
+**`/lane` consequence.** The full chain of section 4: phone to VPS to
+`bot_commands` to a Mac actuator to `orca`. ZOE cannot see the estate, so it
+sends the request and the principal and resolves nothing - repo, worktree and
+brief are all the actuator's job. Every design decision in sections 2, 3 and
+4 exists to serve this branch.
+
+**VPS hop: stage 0.** It is not deferrable. The front end is already on the
+VPS on day one, so the transport is the first thing built, and the enqueue
+authz change (gap 1) is the first thing reviewed. Stage 1 cannot start
+without touching a security boundary.
+
+**What it buys.** One identity and one audience. Voice-IN already wired, so
+spoken `/lane` costs nothing. ZOE's existing auth and deploy are reused. And
+the queue genuinely survives a sleeping Mac - the command waits and runs on
+wake, bounded by the TTL from gap 2.
+
+**What it costs.** Three hosts in the path for every command, so three places
+to be wrong and three to instrument. A live bot with real users gains a
+feature that can regress it. A security-boundary change lands in week one,
+before any of the design has been proven end to end. Two of the three gaps in
+section 3.3 (TTL, reaper) exist *only* because this branch has a queue.
+
+### 11.3 Branch B - own bot, front end on the Mac
+
+A separate Telegram bot whose long-poll loop runs on this Mac, beside the GUI
+and the watcher, started by `zorca up`.
+
+**`/lane` consequence.** Phone to Mac. One process reads the update, checks
+the allowlist, and runs the section 4 chain locally - `run-use`, worktree,
+pane, `dispatch --inject`, short brief, pane readback. **No queue, no
+transport, no enqueue change, no TTL, no reaper.** The three gaps in section
+3.3 are not fixed by this branch; they are not encountered.
+
+**VPS hop: stage 4, or never.** It only arrives if "survives a sleeping Mac"
+turns out to be a real, frequent failure rather than a hypothetical - and if
+it does arrive, it arrives against a chain already proven working, which is
+the safest possible time to add a hop.
+
+**One point that needs checking before this branch is costed.** Telegram's
+`getUpdates` is believed to retain undelivered updates server-side for about
+24 hours, which would mean a `/lane` sent to a sleeping Mac is delivered on
+wake rather than lost - substantially weakening branch A's headline
+advantage, and re-introducing gap 2's stale-command hazard on this side of
+the fence instead. **I have not verified this and it should not be relied on
+until someone does.** It is the single measurement that would most change the
+comparison.
+
+**What it buys.** The simplest chain that can work, and the only one with no
+new authz surface. Instant rather than poll-bounded. ZOE v1 cannot regress
+because ZOE v1 is not touched.
+
+**What it costs.** A second bot identity for an audience that already knows
+`@zaoclaw_bot`, and a fourth app in a loop the vault's own phone-hop note
+already criticises at three. Voice-IN would have to be rebuilt rather than
+inherited. And if the Telegram retention point above turns out false, a
+closed laptop simply drops the request.
+
+### 11.4 What each branch would change in this document
+
+| Section | Under A | Under B |
+|---|---|---|
+| 2 - the shape | as written | replaced by a two-box diagram |
+| 3 - transport | as written | **deleted** |
+| 3.3 - three gaps | as written | **deleted** (not encountered) |
+| 4 - `/lane` chain | as written | unchanged, minus the queue hops |
+| 5 - where it lands | ZAOOS `bot/src/` | `zorca`, beside the actuator |
+| 6 - Telegram first | implied by the verdict | a real choice, still Telegram |
+| 8 - stages | 1a-1e as written | 1a and 1b drop out |
+
+Section 4 surviving both branches is worth noticing: the `/lane` chain and
+its hazards are the durable part of this design. The transport is the part
+under dispute.
+
+### 11.5 Not a recommendation
+
+Branch A is what Zaal is recorded as choosing and it is what sections 2
+through 8 are written for. Branch B is materially simpler and this section
+should not be read as pretending otherwise - but "simpler" is not the only
+axis, and the identity and audience arguments that decided it are Zaal's to
+weigh, not measurable from here.
