@@ -353,18 +353,22 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
-6. **ONE INSTRUCTION IS UNREAD.** A mid-turn message arrived head-truncated,
-   surviving only as *"e delete call stay Zaal's - do not touch either."* It
-   names **two** things as Zaal's and only the second is legible. The head has
-   **not** been reconstructed and nothing has been inferred from it - a
-   truncated instruction is not an instruction, and guessing at a sentence
-   whose subject is a delete call is exactly the wrong place to guess.
-   **Nothing has been pushed and nothing has been deleted.** Every commit on
-   this branch is local; `origin` is untouched and still sits at the commit it
-   held before this lane started. A resend has been
-   requested with the constraint placed at the tail, which is where this
-   channel reliably preserves it. The commits stay local until the message is
-   whole.
+6. ~~One instruction is unread.~~ **CLOSED 2026-08-26.** A mid-turn message
+   arrived head-truncated, surviving only as *"e delete call stay Zaal's - do
+   not touch either."* The head was **not** reconstructed and nothing was
+   inferred from it - a sentence whose visible half concerns a delete call is
+   the worst possible place to guess the missing half. The coordinator has
+   since confirmed the two things named were **issue template placement** and
+   **the delete call**, and that neither was touched. Nothing was pushed and
+   nothing was deleted at any point.
+
+   **The finding that outlived the incident:** this route truncated the head
+   of four inbound messages and preserved the tail every time, while both
+   messages carrying their instruction at the tail arrived intact and
+   actionable. That is measurement, not hypothesis. On this channel
+   **constraint-last is the rule, not a guideline** - the truncated message
+   was ~2KB with its corrections at the head, which is precisely what the
+   playbook entry warns against.
 
 Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md,
 `ZAOcowork` `docs/BOT-API.md`, ZAOOS `bot/src/lib/cowork.ts`
