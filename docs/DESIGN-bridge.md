@@ -1,11 +1,12 @@
 ---
 type: design
 status: proposed
-version: 2
+version: 3
 created: 2026-08-26
 updated: 2026-08-26
 component: ZOE v2 lane control (was "zorca-bridge")
 decides: transport from the VPS to this Mac, the /lane chain, build order
+supersedes: section 8 by section 12 (v3, ratified bridge)
 ---
 
 # ZOE v2 - lane control from chat
@@ -277,7 +278,10 @@ lane creation), and if it is unavailable the actuator falls back to a
 template brief and the lane still opens. Not stage 1 - stage 5, once there
 is a working chain to improve.
 
-## 8. Staged build plan
+## 8. Staged build plan (SUPERSEDED by section 12)
+
+> Superseded 2026-08-26 by Zaal's ratified bridge. Kept for the reasoning;
+> the live plan is **section 12**.
 
 **Stage 1 - `/lane` end to end.** Zaal's instruction: this is first, because
 it unblocks everything else. Five parts, none independently shippable, which
@@ -474,3 +478,161 @@ through 8 are written for. Branch B is materially simpler and this section
 should not be read as pretending otherwise - but "simpler" is not the only
 axis, and the identity and audience arguments that decided it are Zaal's to
 weigh, not measurable from here.
+
+## 12. v3 - the ratified bridge and the live build plan
+
+Zaal answered both open questions and ratified a transport. This section
+supersedes section 8 and settles sections 3 and 11.
+
+**What is now decided:**
+
+- **q4:** ZOE v2 runs on **OpenMatter**, with the **VPS warm as fallback**.
+  Both, not either. This also settles section 11 - there is a ZOE v2, so
+  **branch A is confirmed** and branch B is closed.
+- **q5:** the Telegram retention question is not answered, it is **removed**.
+  A **webhook** to the VPS has no retention dependency at all. That is the
+  right kind of answer to an unverified fact: delete the dependency rather
+  than measure it.
+- **Transport:** Telegram webhook to the VPS; the VPS puts each `/lane`
+  request into a **queue file**; the orchestrator on the Mac **polls the
+  queue**. Not the `bot_commands` plane, not Tailscale-to-`:7777`.
+
+The queue-file design keeps the property that matters and that both earlier
+candidates fought over: **if the Mac sleeps, the queue waits.**
+
+### 12.1 One measured blocker, and the one-word fix
+
+The spec says the VPS writes the queue file *on the Mac over SSH*, and in the
+same breath that the *Mac keeps zero inbound ports*. Those cannot both hold:
+an inbound `ssh` is an inbound port.
+
+Measured on this Mac, today:
+
+```
+$ tailscale status
+Tailscale is stopped.
+$ lsof -nP -iTCP:22 -sTCP:LISTEN
+(no output - nothing is listening on 22)
+```
+
+So VPS-to-Mac SSH is not merely a security tradeoff, it **cannot work today**:
+there is no route (Tailscale down, laptop behind NAT with no static address)
+and no listener (Remote Login off). Enabling both is exactly the inbound
+surface the spec says it avoids.
+
+**The fix is the direction, and nothing else. Invert the SSH.**
+
+> The **queue file lives on the VPS.** The webhook appends to it. The Mac
+> polls it by **SSHing outbound** to the VPS and draining it.
+
+Everything Zaal specified survives intact - webhook so there is no retention
+risk, a queue file rather than a cloud table, SSH rather than an exposed
+port, the orchestrator polling the queue, and the queue waiting through a
+sleep. What changes is who dials. The Mac dials out. And this variant:
+
+- needs **zero** inbound ports on the Mac, literally rather than nearly;
+- works **today**, with no Tailscale and no Remote Login;
+- keeps the VPS as the only machine with a public face, which it already is;
+- survives the Mac changing networks, which a laptop does constantly.
+
+Stage 1 below is written against this variant. If Zaal wants VPS-to-Mac push
+specifically, the cost is: Tailscale back up on both ends, Remote Login on,
+a key installed, and the DNS-gap failure mode that hits exactly when he is
+mobile. That is a real option and it is his call - but it is not free, and it
+is not what the "zero inbound ports" clause describes.
+
+### 12.2 The queue file
+
+A line-delimited JSON append log on the VPS - one record per `/lane`, append
+only, never edited in place:
+
+```
+{"id","ts","expiresAt","principal","request","status"}
+```
+
+Append-only because two writers (webhook) and one reader (Mac) on a file are
+safe if nobody rewrites, and because a crashed drain must never lose a
+request. The Mac drains by reading, acting, then appending a **result
+record** rather than mutating the original - the same claim-and-report shape
+as `bot_commands`, in a file.
+
+Carried over from section 3.3, because a file does not fix them:
+
+- **TTL (`expiresAt`) is required.** A `/lane` fired at a sleeping Mac must
+  not spawn a paid pane six hours later. Queuing through a sleep is a
+  feature; queuing through a night is not.
+- **A restart reaper is required.** Anything the Mac finds claimed-but-not-
+  reported on startup gets an error result, so no request can sit invisible
+  forever. This is the farscout shape and it gets closed at build time.
+
+The `getSession()` enqueue gap from section 3.3 **disappears** - there is no
+`/api/v1` call in this path at all.
+
+### 12.3 Stage 1 - `/lane` end to end on this bridge
+
+Done when a lane opened from Zaal's phone is confirmed briefed by reading the
+pane. Not when the code runs.
+
+- **1a. Webhook receiver on the VPS.** `setWebhook` against the existing
+  `@zaoclaw_bot` token, TLS on the VPS's public name, numeric-id allowlist
+  as the first check, non-allowlisted updates dropped silently. Replaces
+  ZOE's long-poll for this route only.
+- **1b. `/lane` conversation + the append.** Echo back the parsed request and
+  wait for a confirm tap - a lane spends money and a phone keyboard has no
+  hover. On confirm, append the record with `expiresAt`.
+- **1c. Mac-side drain (`zorca-actuator`).** Outbound SSH to the VPS on an
+  interval, pull new records, honour TTL, run the section 4 chain per
+  record, append the result. Restart reaper included, not deferred.
+- **1d. The section 4 chain, unchanged.** `run-use` first - bindings died
+  three times during the writing of this document, so rebinding is
+  unconditional, never error recovery. `dispatch --inject` always; omitting
+  it briefs nobody and cannot be repaired by re-running. Brief short with
+  the load-bearing constraint last, pointing at `dispatch-show --preamble`.
+  **Pane readback before reporting success.**
+- **1e. Report back.** ZOE reads the result record and tells Zaal the task id
+  and pane, or the failure. Never "done" without 1d's readback.
+
+Section 4 is the durable part of this design: it survived branch A, branch B,
+and now a third transport, unchanged.
+
+### 12.4 Stage 2 - OpenMatter runtime, VPS warm fallback
+
+Move ZOE v2's runtime to OpenMatter; keep the VPS instance warm.
+
+**Three things to settle first. Each is measured or structural, not a
+preference.**
+
+1. **Telegram allows exactly one webhook URL per bot token.** OpenMatter and
+   the VPS cannot both receive updates for `@zaoclaw_bot` at the same time.
+   So "warm fallback" is **not** passive standby - failing over means an
+   active health check plus a `setWebhook` repoint, and a decision about who
+   is allowed to fire that repoint. Build the repoint as an explicit,
+   idempotent operation with a manual override, or the fallback is a comfort
+   rather than a mechanism.
+2. **A webhook does not reduce metered cost if billing is by container
+   uptime.** The container must be running to receive an update. On the only
+   rate datum that exists - derived ~0.837 Cr/hr against a ~12 Cr balance -
+   a permanently-up instance is under a day of runway. Before cutover,
+   measure whether OpenMatter bills uptime or invocation. If uptime, this
+   stage needs a topped-up grant or an explicit budget, not an assumption.
+3. **The grant's purpose.** The credits were a partner grant for an agreed
+   newsletter-agent beta. Running ZOE's lane control on them is a different
+   use. Zaal's call, but it should be made deliberately rather than
+   discovered at the balance.
+
+Also inherited: the Hermes template's dashboard and API server are the
+subject of an active exposure campaign. A bot token on that host raises the
+blast radius of a compromise from "an agent" to "the bot that can open
+lanes." The allowlist and the confirm step are what stand between a
+compromised host and a spawned pane, so neither is optional at any stage.
+
+**Sequence:** deploy beside the VPS instance and run it dark first (no
+webhook), verify it can drain and act, then repoint `setWebhook`, keep the
+VPS warm, and rehearse the failback once before trusting it.
+
+### 12.5 Stages 3+
+
+Unchanged from section 8: reads (`/board`, `/gates`, `/status`, `/tail`),
+then gate resolution from chat, then the draft queue with HOLD push, then
+the Discord adapter and the OpenMatter brief-synthesis slot. All are
+additions to a working chain, which is the only safe time to add any of them.
