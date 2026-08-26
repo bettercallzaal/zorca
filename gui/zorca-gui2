@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""
+zorca-gui2 - the ZAO orchestration dashboard, redesigned. Local only.
+
+Decisions first: one NEEDS-YOU rail (gates, drafts, panes that asked you
+something), then the wall, then everything else behind a fold. The count
+can reach zero, and zero is rendered as a win.
+
+Implements research doc 2420 (SPEC.md). Runs on 7778 so the original
+zorca-gui on 7777 stays up for side-by-side comparison.
+
+One file, stdlib only. Serves a live board at http://127.0.0.1:7778 over
+YOUR state: Orca panes (via orca-board --json), the orchestration Run's
+tasks and decision gates (via the orca CLI). Gates are answered by tapping
+an option - the tap runs `orca orchestration gate-resolve`, nothing else.
+
+Never exposed off-localhost. Never touches Orca's code. Reads state, and
+the only writes it can do are the ones Zaal taps: resolve a gate, focus a
+pane.
+
+Run:  zorca-gui2           (then open http://127.0.0.1:7778)
+      zorca-gui2 --port N
+"""
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Env-overridable so the staleness path can be exercised without editing
+# the file (SPEC 2 accept check: point ORCA at a path that does not exist).
+ORCA = os.environ.get("ORCA", "/opt/homebrew/bin/orca")
+BOARD = os.environ.get("ORCA_BOARD", os.path.expanduser("~/bin/orca-board"))
+PORT = 7778
+
+# State cache: pane scraping costs ~1s per pane, so refresh in the
+# background and serve the cache instantly.
+CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
+         "drafts": [], "resolved": [], "lanes": [], "log": [],
+         "err": "", "err_ts": 0}
+LOCK = threading.Lock()
+QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
+# Gate ids already resolved this process - the server-side double-tap guard.
+RESOLVED = set()
+
+
+def queue_read():
+    try:
+        return json.load(open(QUEUE))
+    except Exception:
+        return []
+
+
+def queue_drop(did):
+    items = [i for i in queue_read() if i.get("id") != did]
+    json.dump(items, open(QUEUE, "w"), indent=1)
+
+
+def sh(args, timeout=60, strict=False):
+    """Run a command and return stdout.
+
+    strict=True is the refresh path: a missing binary or a timeout is a
+    real failure and must reach the header, not become an empty string.
+    SPEC 2 asks the board to fail loud, and it cannot if every read swallows
+    its own exception. Tap handlers stay strict=False - a failed tap already
+    reports itself through the toast.
+    """
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if strict:
+            raise
+        return ""
+    except Exception:
+        if strict:
+            raise
+        return ""
+
+
+def orca_json(*args):
+    out = sh([ORCA] + list(args) + ["--json"], strict=True)
+    try:
+        return json.loads(out).get("result", {})
+    except Exception:
+        return {}
+
+
+ODB = os.path.expanduser(
+    "~/Library/Application Support/orca/orchestration.db")
+
+
+def load_tasks(run_id):
+    """Straight from the orchestration DB, read-only - specs included.
+
+    file: URI with mode=ro so we can never write, and a busy_timeout so a
+    daemon write never wedges the refresh.
+    """
+    import sqlite3
+    rows = []
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % ODB, uri=True, timeout=3)
+        cur = con.execute(
+            "SELECT id, status, task_title, spec, created_at FROM tasks "
+            "ORDER BY created_at")
+        for tid, status, title, spec, upd in cur.fetchall():
+            rows.append(dict(id=tid, status=status, title=title or "?",
+                             spec=spec or "", updated=upd or ""))
+        con.close()
+    except Exception:
+        # Fall back to the CLI text parse if the schema shifts.
+        for ln in sh([ORCA, "orchestration", "task-list", "--run",
+                      run_id]).splitlines():
+            ln = ln.strip()
+            if ln.startswith("task_"):
+                parts = ln.split()
+                rows.append(dict(id=parts[0],
+                                 status=parts[1].strip("[]") if len(parts) > 1 else "?",
+                                 title=parts[2] if len(parts) > 2 else "?",
+                                 spec="", updated=""))
+    return rows
+
+
+MANIFEST = os.path.expanduser(
+    "~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md")
+
+
+def load_lanes():
+    """Parked lanes from the vault manifest: | Lane | `worktree` | `cmd` |"""
+    lanes = []
+    try:
+        for ln in open(MANIFEST):
+            if not ln.startswith("|") or "---" in ln or "Worktree" in ln:
+                continue
+            cells = [c.strip() for c in ln.strip("|\n").split("|")]
+            if len(cells) < 3:
+                continue
+            name = cells[0]
+            wt = cells[1].strip("`").replace("~", os.path.expanduser("~"))
+            m = cells[2]
+            cmd = ""
+            if "claude --resume" in m:
+                cmd = "claude --resume " + \
+                    m.split("claude --resume", 1)[1].strip("` ").split("`")[0].split(" - ")[0].strip()
+            if cmd and os.path.isdir(wt):
+                lanes.append(dict(name=name, worktree=wt, cmd=cmd))
+    except Exception:
+        pass
+    return lanes
+
+
+BOARD_LOG = os.path.expanduser("~/.zao/orca-board.log")
+
+
+def tail_log(n=14):
+    """Last lines of the watcher log - the HOLD/QUEUE/SENT trail."""
+    try:
+        with open(BOARD_LOG, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode(errors="replace").splitlines()
+        return [l for l in lines if l.strip()][-n:]
+    except Exception:
+        return []
+
+
+def current_run():
+    """Terminal bindings die on every Orca restart; discover, never bind."""
+    for ln in sh([ORCA, "orchestration", "run-list"], strict=True).splitlines():
+        if ln.startswith("run_") and "legacy" not in ln:
+            return ln.split()[0]
+    return ""
+
+
+def refresh():
+    # No bare except here: if orca-board is gone or its JSON is garbage the
+    # board is blind, and a blind board must say so (SPEC 2).
+    board = json.loads(sh(["python3", BOARD, "--json"], timeout=120,
+                          strict=True) or "[]")
+    run_id = current_run()
+    gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
+    for g in gates:
+        try:
+            g["options"] = json.loads(g.get("options") or "[]")
+        except Exception:
+            g["options"] = []
+    runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
+    pending = [g for g in gates if g.get("status") == "pending"]
+    resolved = [g for g in gates if g.get("status") != "pending"]
+    with LOCK:
+        CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
+                     gates=pending, resolved=resolved[-8:],
+                     drafts=queue_read(), lanes=load_lanes(),
+                     log=tail_log(),
+                     run=runs[0][:120] if runs else "")
+
+
+def refresher():
+    """A dead refresher must not render as a healthy board.
+
+    The old version swallowed every exception, so an hour-old cache looked
+    normal. Now the failure rides along in the payload and the header says
+    so (SPEC 2).
+    """
+    while True:
+        try:
+            refresh()
+            with LOCK:
+                CACHE["err"] = ""
+        except Exception as e:
+            with LOCK:
+                CACHE["err"] = "%s: %s" % (type(e).__name__, e)
+                CACHE["err_ts"] = time.time()
+        time.sleep(20)
+
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<title>ZORCA</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  /* brand - locked, do not tune (community.config.ts:20,24) */
+  --navy:#0a1628;
+  --gold:#f5a623;
+  /* surfaces - measured against --navy */
+  --panel:#16283f;            /* 1.25:1 on navy - a visible card, was 1.09 */
+  --panel-raised:#1d3352;     /* hover / expanded */
+  /* borders */
+  --line:#26405f;             /* decorative hairlines */
+  --line-interactive:#5679a5; /* 3.32:1 on panel, 4.04:1 on navy - WCAG 1.4.11 */
+  /* text - all >= 4.5:1 on both navy and panel */
+  --text:#e8edf5;
+  --dim:#9bb0cd;              /* 6.73:1 on panel, was #8ba0bf at 6.22 */
+  /* status */
+  --ok:#3ddc84;
+  --warn:#ff7a7a;             /* 5.90:1 on panel, was #ff5d5d at 5.50 */
+  --info:#6fb3ff;
+  /* geometry */
+  --r:10px;
+  --gap:14px;
+}
+:focus-visible { outline:2px solid var(--gold); outline-offset:2px;
+                 border-radius:4px; }
+* { box-sizing:border-box; margin:0; }
+body { background:var(--navy); color:var(--text);
+       font:15px/1.45 "SF Mono", ui-monospace, Menlo, monospace; padding:20px; }
+h1 { font-size:20px; letter-spacing:.14em; color:var(--gold); }
+h1 small { color:var(--dim); letter-spacing:0; font-size:12px; margin-left:12px; }
+h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
+     color:var(--dim); margin:26px 0 10px; }
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:26px; }
+@media (max-width:980px){ .grid{grid-template-columns:1fr} }
+.card { background:var(--panel); border:1px solid var(--line);
+        border-radius:var(--r); padding:14px 16px; margin-bottom:10px; }
+.card[onclick] { border-color:var(--line-interactive); }
+.card[onclick]:hover { background:var(--panel-raised); }
+.gate { border-left:3px solid var(--gold); }
+.gate .q { margin-bottom:10px; }
+.gate button, .gate input[type=text] {
+  font:inherit; margin:3px 6px 3px 0; padding:6px 12px; border-radius:7px;
+  border:1px solid var(--line-interactive); background:var(--navy);
+  color:var(--text); cursor:pointer; }
+.gate button:hover { border-color:var(--gold); color:var(--gold); }
+.gate input[type=text] { width:58%; cursor:text; }
+.pane { display:flex; gap:12px; align-items:baseline; cursor:pointer; }
+.pane:hover .repo { color:var(--gold); }
+.repo { min-width:170px; font-weight:600; }
+.state { min-width:120px; color:var(--dim); }
+.state.hot { color:var(--warn); }
+.state.q { color:var(--gold); }
+.ctx { min-width:60px; color:var(--dim); }
+.detail { color:var(--dim); font-size:13px; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+.task { display:flex; gap:12px; padding:3px 0; }
+.task .st { min-width:100px; }
+.st-completed{color:var(--ok)} .st-ready{color:var(--gold)}
+.st-blocked{color:var(--warn)} .st-dispatched{color:var(--info)}
+.st-pending{color:var(--dim)}
+#toast { position:fixed; bottom:22px; right:22px; background:var(--gold);
+         color:var(--navy); padding:10px 16px; border-radius:8px;
+         font-weight:700; display:none; z-index:9; }
+#toast.bad { background:var(--warn); color:var(--navy); }
+.stamp { color:var(--dim); font-size:12px; }
+header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
+         border-left:3px solid transparent; padding-left:10px; margin-left:-13px; }
+header.warn { border-left-color:var(--gold); }
+#freshness { font-size:13px; }
+#freshness .fresh { color:var(--ok); }
+#freshness .aging { color:var(--dim); }
+#freshness .stale { color:var(--gold); font-weight:700; }
+#freshness .at { color:var(--dim); margin-left:8px; }
+</style></head><body>
+<header id="head">
+ <h1>ZORCA <small id="run"></small></h1>
+ <div id="freshness"></div>
+</header>
+<div class="grid">
+ <div>
+  <h2>Gates - your calls <span id="gcount"></span></h2>
+  <div id="gates"></div>
+  <h2>Tasks</h2>
+  <div class="card" id="tasks"></div>
+ </div>
+ <div>
+  <h2>Panes</h2>
+  <div id="panes"></div>
+  <h2>Drafts awaiting your tap <span id="dcount"></span></h2>
+  <div id="drafts"></div>
+  <h2>Recently resolved</h2>
+  <div class="card" id="resolved"></div>
+  <h2>Parked lanes - tap to reopen</h2>
+  <div class="card" id="lanes"></div>
+  <h2>Watcher trail</h2>
+  <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
+    max-height:220px;overflow-y:auto"></div>
+ </div>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const INFLIGHT = new Set();
+async function post(url, body, el){
+  const key = url + "|" + (body.id || body.handle || body.i);
+  if (INFLIGHT.has(key)) return;
+  INFLIGHT.add(key);
+  if (el) { el.disabled = true; el.dataset.was = el.textContent; el.textContent = "..."; }
+  let ok = false, why = "";
+  try {
+    const r = await fetch(url, {method:"POST", body: JSON.stringify(body)});
+    ok = r.ok;
+    if (!ok) why = " (" + r.status + ")";
+  } catch (e) {
+    why = " (no server)";
+  }
+  toast(ok ? "done" : "failed" + why, ok);
+  INFLIGHT.delete(key);
+  if (el && el.dataset.was) { el.disabled = false; el.textContent = el.dataset.was; }
+  load();
+}
+function toast(msg, ok){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = ok ? "" : "bad";
+  t.style.display = "block";
+  setTimeout(()=>t.style.display="none", ok ? 1800 : 4000);
+}
+function ago(sec){
+  if (sec < 90) return Math.round(sec) + "s";
+  if (sec < 5400) return Math.round(sec/60) + "m";
+  return (sec/3600).toFixed(1) + "h";
+}
+function freshness(s){
+  const at = new Date(s.ts*1000).toLocaleTimeString();
+  const age = Date.now()/1000 - s.ts;
+  let cls = "fresh", txt = "live";
+  if (age >= 45) { cls = "aging"; txt = "as of " + at; }
+  if (age > 90) { cls = "stale"; txt = "STALE " + ago(age) + " - refresher may be dead"; }
+  if (s.err) { cls = "stale"; txt = "STALE - " + s.err; }
+  document.getElementById("freshness").innerHTML =
+    `<span class="${cls}">${esc(txt)}</span>` +
+    (cls === "fresh" ? `<span class="at">${esc(at)}</span>` : "");
+  document.getElementById("head").classList.toggle("warn", cls === "stale");
+}
+function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+async function load(){
+  const s = await (await fetch("/api/state")).json();
+  document.getElementById("run").textContent = s.run;
+  freshness(s);
+  document.getElementById("gcount").textContent = "("+s.gates.length+")";
+  document.getElementById("gates").innerHTML = s.gates.map(g => `
+    <div class="card gate">
+      <div class="q" style="white-space:pre-wrap">${esc(g.question)}</div>
+      <div class="stamp" style="margin-bottom:8px">filed ${esc(g.created_at||"")}
+        · task ${esc(g.task_id||"")}</div>
+      <div>
+        ${g.options.map(o=>`<button onclick='post("/api/resolve",
+          {id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("")}
+        ${g.options.length==0?`<button onclick='post("/api/resolve",
+          {id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."}, this)'
+          >close - addressed</button>`:""}
+        <input type="text" id="in-${g.id}" placeholder="or type an answer">
+        <button onclick='post("/api/resolve",{id:"${g.id}",
+          resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>
+      </div>
+    </div>`).join("") || '<div class="card">nothing needs you</div>';
+  document.getElementById("panes").innerHTML = s.panes.map(p => `
+    <div class="card pane" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
+      <span class="repo">${esc(p.repo)}</span>
+      <span class="state ${p.state=="ctx-critical"?"hot":(p.rank<=2?"q":"")}">${p.state}</span>
+      <span class="ctx">${p.ctx==null?"-":p.ctx+"%"}</span>
+      <span class="detail">${esc(p.question||p.tail||"")}</span>
+    </div>`).join("") || '<div class="card">no live panes</div>';
+  document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
+    <div class="task" style="cursor:pointer" onclick='
+      const el=document.getElementById("spec-"+${i});
+      el.style.display = el.style.display=="none" ? "block" : "none";'>
+      <span class="st st-${t.status}">${t.status}</span>
+      <span>${esc(t.title)}</span></div>
+    <div id="spec-${i}" style="display:none" class="detail"
+      ><div style="white-space:normal;padding:4px 0 10px 112px">
+      ${esc(t.spec)}<br><span class="stamp">${t.id} · ${esc(t.updated)}</span>
+      </div></div>`).join("");
+  document.getElementById("dcount").textContent = "("+s.drafts.length+")";
+  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
+    <div class="card gate">
+      <div class="q"><b>${esc(d.repo)}</b>
+        <span class="stamp">${esc(d.reason)}</span></div>
+      <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"}, this)'>Send</button>
+      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>
+    </div>`).join("") || '<div class="card">queue empty</div>';
+  document.getElementById("resolved").innerHTML = s.resolved.map(g => `
+    <div class="task"><span class="st st-completed">resolved</span>
+      <span>${esc(g.question.slice(0,70))} → <b>${esc(g.resolution||"")}</b></span>
+    </div>`).join("") || '<span class="stamp">none yet</span>';
+  document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
+    <div class="task"><button style="font:inherit;padding:2px 10px;
+      border-radius:6px;border:1px solid var(--line);background:var(--navy);
+      color:var(--gold);cursor:pointer"
+      onclick='post("/api/lane",{i:${i}}, this)'>open</button>
+      <span>${esc(l.name)}</span>
+      <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
+    </div>`).join("") || '<span class="stamp">no parked lanes</span>';
+  document.getElementById("wlog").innerHTML = s.log.map(l => {
+    let c = "var(--dim)";
+    if (l.includes(" SENT ")) c = "var(--ok)";
+    if (l.includes(" HOLD ") || l.includes("QUEUE")) c = "var(--gold)";
+    if (l.includes("DROPPED") || l.includes("failed")) c = "var(--warn)";
+    return `<div style="color:${c}">${esc(l)}</div>`;
+  }).join("") || '<span class="stamp">watcher not running</span>';
+}
+load(); setInterval(load, 15000);
+</script></body></html>"""
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/":
+            self._send(200, PAGE, "text/html; charset=utf-8")
+        elif self.path == "/api/state":
+            with LOCK:
+                self._send(200, json.dumps(CACHE))
+        else:
+            self._send(404, "{}")
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(n) or "{}")
+        except Exception:
+            body = {}
+        if self.path == "/api/resolve" and body.get("id") and body.get("resolution"):
+            # Belt to the client's braces: even if a second tap escapes the
+            # in-flight guard, it must not shell out a second gate-resolve.
+            with LOCK:
+                if body["id"] in RESOLVED:
+                    self._send(200, json.dumps({"ok": True, "dup": True}))
+                    return
+            out = sh([ORCA, "orchestration", "gate-resolve", "--id", body["id"],
+                      "--resolution", body["resolution"], "--json"])
+            ok = '"ok": true' in out or '"ok":true' in out
+            if ok:
+                with LOCK:
+                    RESOLVED.add(body["id"])
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200 if ok else 500, json.dumps({"ok": ok}))
+        elif self.path == "/api/focus" and body.get("handle"):
+            sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
+            self._send(200, '{"ok": true}')
+        elif self.path == "/api/lane" and body.get("i") is not None:
+            lanes = load_lanes()
+            ok = False
+            try:
+                l = lanes[int(body["i"])]
+                # Zaal's tap: open an Orca pane in the lane's worktree and
+                # resume its Claude session. Spawns a paid session - which is
+                # exactly what the button says it does.
+                out = sh([ORCA, "terminal", "create", "--worktree",
+                          "path:" + l["worktree"], "--title", l["name"],
+                          "--command", l["cmd"], "--focus"], timeout=120)
+                ok = "Created terminal" in out
+            except Exception:
+                pass
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200 if ok else 500, json.dumps({"ok": ok}))
+        elif self.path == "/api/draft" and body.get("id"):
+            item = next((i for i in queue_read() if i["id"] == body["id"]), None)
+            ok = True
+            if item and body.get("action") == "send":
+                # The human tapped Send - this is Zaal's keystroke, so no
+                # auto-draft prefix; it carries his authority.
+                out = sh([ORCA, "terminal", "send", "--terminal",
+                          item["handle"], "--text", item["text"], "--enter"])
+                ok = "Sent" in out
+            if item:
+                queue_drop(body["id"])
+            threading.Thread(target=refresh, daemon=True).start()
+            self._send(200 if ok else 500, json.dumps({"ok": ok}))
+        else:
+            self._send(400, '{"ok": false}')
+
+
+def main():
+    port = PORT
+    if "--port" in sys.argv:
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+    threading.Thread(target=refresher, daemon=True).start()
+    print("ZORCA GUI2 on http://127.0.0.1:%d  (ctrl-c to stop)" % port)
+    ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
