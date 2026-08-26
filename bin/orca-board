@@ -34,8 +34,9 @@ RANK = {
     "choice-prompt": 1,
     "asked-question": 2,
     "waiting": 3,
-    "idle-done": 4,
-    "bare-shell": 5,
+    "working": 4,
+    "idle-done": 5,
+    "bare-shell": 6,
 }
 
 # Terminal chrome that carries letters but is not agent output.
@@ -71,9 +72,24 @@ def terminals():
         title = line[len(handle):]
         if m:
             title = title[:m.start() - len(handle)]
-        rows.append(dict(handle=handle, title=title.strip().lstrip("*").strip(),
+        title = title.strip().lstrip("*").strip()
+        # Never watch ourselves: a board pane's screen is board output, and
+        # classifying it scrapes our own rendered ctx%/state strings.
+        if "ZORCA board" in title or "orca-board" in title:
+            continue
+        rows.append(dict(handle=handle, title=title,
                          cwd=cwd, repo=reponame(cwd)))
     return rows
+
+
+def pending_gates():
+    """Gates are Zaal's queue and live in orchestration, not on any screen."""
+    out = run("orchestration", "gate-list", "--json")
+    try:
+        gates = json.loads(out).get("result", {}).get("gates", [])
+        return [g for g in gates if g.get("status", "pending") == "pending"]
+    except Exception:
+        return []
 
 
 def reponame(cwd):
@@ -147,6 +163,11 @@ def classify(text):
         state = "bare-shell"
     elif ctx is not None and ctx >= 85:
         state = "ctx-critical"
+    elif "[WORKING]" in text:
+        # Actively generating - needs nothing, and prompting it now would
+        # interleave with its own output.
+        state = "working"
+        question = ""
     elif question:
         state = "asked-question"
     elif waiting:
@@ -217,8 +238,11 @@ def draft(row):
 def render(rows):
     lines = []
     blocked = sum(1 for r in rows if r["rank"] <= 2)
-    lines.append("ORCA BOARD  %d panes, %d want you  %s"
-                 % (len(rows), blocked, time.strftime("%H:%M:%S")))
+    gates = pending_gates()
+    lines.append("ORCA BOARD  %d panes, %d want you, %d gates pending  %s"
+                 % (len(rows), blocked, len(gates), time.strftime("%H:%M:%S")))
+    for g in gates[:6]:
+        lines.append("   GATE %s" % (g.get("question", "?")[:100]))
     lines.append("")
     for i, r in enumerate(rows, 1):
         ctx = ("%d%%" % r["ctx"]) if r["ctx"] is not None else "  -"
@@ -259,6 +283,30 @@ def drafts(argv):
 
 
 LOG = os.path.expanduser("~/.zao/orca-board.log")
+QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
+
+
+def queue_read():
+    try:
+        return json.load(open(QUEUE))
+    except Exception:
+        return []
+
+
+def queue_write(items):
+    os.makedirs(os.path.dirname(QUEUE), exist_ok=True)
+    json.dump(items, open(QUEUE, "w"), indent=1)
+
+
+def queue_add(repo, handle, text, reason):
+    items = queue_read()
+    if any(i["handle"] == handle and i["text"] == text for i in items):
+        return False
+    items.append(dict(id="d%d" % int(time.time() * 1000), repo=repo,
+                      handle=handle, text=text, reason=reason,
+                      ts=time.time()))
+    queue_write(items)
+    return True
 
 # Never auto-answer a picker whose options look irreversible or outward-facing.
 # These are Zaal's calls, not the loop's.
@@ -281,10 +329,14 @@ def risky(row):
 
 
 def auto(argv):
-    """Watch every pane. When one stalls, draft its next step and send it.
+    """Watch every pane. When one stalls, draft its next step.
 
-    Holds back anything that looks irreversible so Zaal decides those.
+    Default policy after 2026-08-25: QUEUE drafts for a human tap in the
+    zorca GUI. Only the mechanical class auto-sends: the handoff-and-stop
+    instruction to a ctx-critical pane. Pass --send-all to restore full
+    auto-send (not recommended; see PLAYBOOK).
     """
+    sendall = "--send-all" in argv
     i = argv.index("--auto")
     every = int(argv[i + 1]) if len(argv) > i + 1 and argv[i + 1].isdigit() else 90
     cooldown = 240  # do not re-prompt the same pane faster than this
@@ -323,8 +375,17 @@ def auto(argv):
             # live upstream PR and delete its fork).
             bad = [w.strip() for w in DANGER if w in text.lower()]
             if bad:
-                logline("HOLD  %-22s draft matched %s" % (r["repo"], ",".join(bad[:3])))
-                logline("      draft was: %s" % text.replace("\n", " ")[:130])
+                if queue_add(r["repo"], key, text, "draft matched " + ",".join(bad[:3])):
+                    logline("QUEUE %-22s draft matched %s -> GUI"
+                            % (r["repo"], ",".join(bad[:3])))
+                continue
+            # Mechanical class auto-sends; judgment calls queue for a tap.
+            mechanical = r["state"] == "ctx-critical"
+            if not (mechanical or sendall):
+                if queue_add(r["repo"], key, text, "judgment call"):
+                    logline("QUEUE %-22s -> GUI  %s"
+                            % (r["repo"], text.replace("\n", " ")[:90]))
+                lastsent[key] = time.time()
                 continue
             # Provenance tag: the pane must know this is machine-drafted, not
             # Zaal. Panes are briefed to treat [auto] claims as unverified.
