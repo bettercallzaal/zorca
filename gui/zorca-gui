@@ -29,7 +29,7 @@ PORT = 7777
 # State cache: pane scraping costs ~1s per pane, so refresh in the
 # background and serve the cache instantly.
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
-         "drafts": [], "resolved": [], "lanes": []}
+         "drafts": [], "resolved": [], "lanes": [], "log": []}
 LOCK = threading.Lock()
 QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
 
@@ -125,6 +125,21 @@ def load_lanes():
     return lanes
 
 
+BOARD_LOG = os.path.expanduser("~/.zao/orca-board.log")
+
+
+def tail_log(n=14):
+    """Last lines of the watcher log - the HOLD/QUEUE/SENT trail."""
+    try:
+        with open(BOARD_LOG, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode(errors="replace").splitlines()
+        return [l for l in lines if l.strip()][-n:]
+    except Exception:
+        return []
+
+
 def current_run():
     """Terminal bindings die on every Orca restart; discover, never bind."""
     for ln in sh([ORCA, "orchestration", "run-list"]).splitlines():
@@ -153,6 +168,7 @@ def refresh():
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
+                     log=tail_log(),
                      run=runs[0][:120] if runs else "")
 
 
@@ -226,6 +242,9 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
   <div class="card" id="resolved"></div>
   <h2>Parked lanes - tap to reopen</h2>
   <div class="card" id="lanes"></div>
+  <h2>Watcher trail</h2>
+  <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
+    max-height:220px;overflow-y:auto"></div>
  </div>
 </div>
 <div id="toast"></div>
@@ -293,6 +312,13 @@ async function load(){
       <span>${esc(l.name)}</span>
       <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
+  document.getElementById("wlog").innerHTML = s.log.map(l => {
+    let c = "var(--dim)";
+    if (l.includes(" SENT ")) c = "var(--ok)";
+    if (l.includes(" HOLD ") || l.includes("QUEUE")) c = "var(--gold)";
+    if (l.includes("DROPPED") || l.includes("failed")) c = "var(--warn)";
+    return `<div style="color:${c}">${esc(l)}</div>`;
+  }).join("") || '<span class="stamp">watcher not running</span>';
 }
 load(); setInterval(load, 15000);
 </script></body></html>"""
