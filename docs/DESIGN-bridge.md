@@ -347,8 +347,8 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    documented and repeated that the unsent prompt-line text is not an answer.
    Both branches are now written up in **section 11**, which also states why
    this lane did not resolve the tension itself.
-5. Does Telegram retain undelivered `getUpdates` for ~24h? Unverified, and it
-   is the measurement that most changes the branch comparison (section 11.3).
+5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
+   **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
 
 Related: [[orca-organization]], [[phone-hop-in-anywhere]], PLAYBOOK.md,
 `ZAOcowork` `docs/BOT-API.md`, ZAOOS `bot/src/lib/cowork.ts`
@@ -636,3 +636,38 @@ Unchanged from section 8: reads (`/board`, `/gates`, `/status`, `/tail`),
 then gate resolution from chat, then the draft queue with HOLD push, then
 the Discord adapter and the OpenMatter brief-synthesis slot. All are
 additions to a working chain, which is the only safe time to add any of them.
+
+## 13. One belief left unmeasured, on purpose
+
+Open question 5 asked whether Telegram retains undelivered `getUpdates` for
+about 24 hours. It is closed **without being measured**, and this section
+records why so nobody re-opens it as an oversight.
+
+**It no longer decides anything.**
+
+1. It was only ever load-bearing for the **branch comparison**. Its whole
+   weight was that if Telegram retains updates, branch B keeps most of
+   branch A's sleeping-Mac advantage without the VPS hop (section 11.3).
+   **Branch A stands** - Zaal confirmed ZOE v2 - so the comparison it fed is
+   settled and the answer changes no decision.
+2. The ratified transport **removed the dependency outright**. Stage 1 is a
+   **webhook**, not `getUpdates`. Retention is a property of a polling API
+   this design no longer uses. Even under branch B the question would now be
+   moot.
+
+**And measuring it costs more than it returns.** There is no documentation
+substitute for the real behaviour of a real token, so a genuine test means
+taking `@zaoclaw_bot` off updates, letting real messages accumulate, and
+observing what arrives on reconnect. That bot is a live surface Zaal uses
+daily. The price is deliberately not answering his actual messages for hours
+to settle a question that gates nothing - a live degradation bought with
+nothing.
+
+**The rule this is an instance of.** An unverified belief is only worth
+measuring while something still rests on it. When the design moves and
+nothing does, the honest move is to mark it unmeasured and say so - not to
+quietly assert it, and not to spend real cost proving a fact that has stopped
+mattering. It stays written down as a belief, never cited as a finding, and
+if a future design puts weight back on it, it gets measured then.
+
+Related: section 11.3 (where it mattered), section 12 (which removed it).
