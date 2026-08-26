@@ -328,6 +328,22 @@ def risky(row):
     return [w.strip() for w in DANGER if w in blob]
 
 
+NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
+
+
+def notify(title, message, handle=None):
+    """macOS banner; clicking it focuses the pane in Orca (Zaal's ask
+    2026-08-26: 'something is done, click it and go over to that terminal')."""
+    cmd = [NOTIFIER, "-title", "ZORCA", "-subtitle", title,
+           "-message", message[:120], "-group", handle or title]
+    if handle:
+        cmd += ["-execute", "%s terminal switch --terminal %s" % (ORCA, handle)]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
 def auto(argv):
     """Watch every pane. When one stalls, draft its next step.
 
@@ -341,6 +357,7 @@ def auto(argv):
     every = int(argv[i + 1]) if len(argv) > i + 1 and argv[i + 1].isdigit() else 90
     cooldown = 240  # do not re-prompt the same pane faster than this
     lastsent = {}
+    prevstate = {}
     logline("auto mode on, polling every %ds. log: %s" % (every, LOG))
     while True:
         try:
@@ -350,6 +367,23 @@ def auto(argv):
             time.sleep(every)
             continue
         skip = [s for s in os.environ.get("ORCA_BOARD_SKIP", "").split(",") if s]
+        # Banner on real transitions: a working pane that finished or now
+        # needs Zaal. Never on first sight (startup would spam a banner per
+        # pane), never repeats (state must change again first).
+        for r in rows:
+            prev = prevstate.get(r["handle"])
+            cur = r["state"]
+            if prev is not None and prev != cur and prev == "working":
+                if cur in ("asked-question", "choice-prompt"):
+                    notify("%s needs you" % r["repo"],
+                           r.get("question") or "question waiting", r["handle"])
+                elif cur == "idle-done":
+                    notify("%s finished" % r["repo"],
+                           r.get("tail") or "lane went quiet", r["handle"])
+                elif cur == "ctx-critical":
+                    notify("%s near compact" % r["repo"],
+                           "ctx %s%% - handoff time" % r.get("ctx"), r["handle"])
+            prevstate[r["handle"]] = cur
         for r in rows:
             if r["rank"] > 3:
                 continue
