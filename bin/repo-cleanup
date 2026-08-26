@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""
+repo-cleanup - the estate cleanup from notes/repo-estate.md, as runnable steps.
+
+Every subcommand is DRY RUN by default. Nothing happens without --apply.
+
+  repo-cleanup audit            re-measure: local clones, unpushed, duplicates
+  repo-cleanup backup [--apply] push every branch that exists only locally
+  repo-cleanup archive [--apply] archive dead GitHub repos (reversible)
+  repo-cleanup rename           print the folder renames (never auto-applies)
+  repo-cleanup nolicense        list public repos with no LICENSE
+
+Order matters. `audit` first, and read its three sections as three different
+risks: UNCOMMITTED is work not in git at all (most fragile), UNBACKED is a
+checked-out branch on no remote, STRAY is old local branches already merged.
+Nothing should be deleted or consolidated until UNCOMMITTED and UNBACKED are
+clear.
+"""
+import json
+import os
+import subprocess
+import sys
+import datetime
+
+HOME = os.path.expanduser("~")
+# OWNERS, not orgs. Both are GitHub USER accounts (type=User), so
+# `gh api orgs/<name>/repos` 404s on both. `gh repo list <name>` below works
+# for users and orgs alike, which is why this script is unaffected. A separate
+# dormant org ZAO-DEVZ (with a dash) exists and is NOT either of these.
+OWNERS = ["bettercallzaal", "ZAODEVZ"]
+ROOTS = [os.path.join(HOME, "Documents"), os.path.join(HOME, "Desktop", "repos")]
+# Repos that live directly in $HOME rather than under a scanned root. Missing
+# zaal-dotfiles here hid 53 dirty files on feat/tracker-ready - the same state
+# that lost ~36 scripts on 2026-08-11.
+EXTRA = [os.path.join(HOME, d) for d in
+         ("zao-vault", "zaal-dotfiles", "orca", ".zao")]
+DEAD_DAYS = 180
+
+# Folder renames. Left as a printed plan, never automated: renaming a folder
+# breaks every open pane, worktree, and hardcoded path pointing at it.
+RENAMES = [
+    ("Documents/soltracker", "wwtracker-solana", "same repo as Desktop/repos/wwtracker"),
+    ("Documents/ZAOstock-canonical", "zaostock-stale", "6 days behind the repo it claims to be canonical for"),
+    ("Documents/zdevcon", "zaotravelz", "remote is bettercallzaal/zaotravelz"),
+    ("Documents/zolbot", "zol", "remote is bettercallzaal/zol"),
+    ("Documents/maccleanup", "mac-optimization", "remote is bettercallzaal/mac-optimization"),
+    ("Documents/bczstrat", "bcz-strategies", "remote is bettercallzaal/bcz-strategies"),
+    ("Documents/zaoweb", "zao-website", "remote is bettercallzaal/zao-website"),
+    ("Documents/zaostream", "zao-streamer-kit", "remote is bettercallzaal/zao-streamer-kit"),
+    ("Desktop/repos/fractalbotjuly2026", "fractalbotapril2026", "remote says april, folder says july"),
+]
+
+
+def sh(*a, **kw):
+    return subprocess.run(list(a), capture_output=True, text=True,
+                          timeout=kw.get("timeout", 120))
+
+
+def git(p, *a):
+    return sh("git", "-C", p, *a).stdout.strip()
+
+
+def local_repos():
+    out = []
+    for r in ROOTS:
+        if not os.path.isdir(r):
+            continue
+        for d in sorted(os.listdir(r)):
+            p = os.path.join(r, d)
+            if os.path.isdir(os.path.join(p, ".git")):
+                out.append(p)
+    out += [p for p in EXTRA if os.path.isdir(os.path.join(p, ".git"))]
+    return out
+
+
+def rel(p):
+    return p.replace(HOME + "/", "")
+
+
+def unpushed(p):
+    """Commits on any local branch that no remote has."""
+    txt = git(p, "log", "--branches", "--not", "--remotes", "--oneline")
+    return [x for x in txt.splitlines() if x]
+
+
+def cmd_audit():
+    """Two very different risks. Keep them apart.
+
+    UNBACKED: the branch you are working on right now has no upstream. Real
+    exposure - that work exists in exactly one place.
+
+    STRAY: commits on old local branches no remote holds. Usually already
+    merged to main via PR; noise, not danger. A high count means branch
+    accumulation, which is a tidiness problem.
+    """
+    unbacked, stray, uncommitted = [], [], []
+    for p in local_repos():
+        cur = git(p, "rev-parse", "--abbrev-ref", "HEAD")
+        has_remote = bool(git(p, "remote", "get-url", "origin"))
+        up = git(p, "rev-parse", "--abbrev-ref", "%s@{u}" % cur) if has_remote else ""
+        ahead = git(p, "rev-list", "--count", "@{u}..HEAD") if up else None
+        dirty = len([x for x in git(p, "status", "--porcelain").splitlines() if x])
+        nb = len([x for x in git(p, "branch").splitlines() if x])
+        n_stray = len(unpushed(p))
+        if not up or (ahead or "0") != "0":
+            unbacked.append((rel(p), cur, "NO REMOTE" if not has_remote
+                             else "no upstream" if not up
+                             else "%s ahead" % ahead, dirty))
+        if n_stray:
+            stray.append((rel(p), n_stray, nb))
+        # Uncommitted work is not in git at all - the most fragile state there
+        # is, and invisible to any push-based check. Track it separately.
+        if dirty:
+            uncommitted.append((dirty, rel(p), cur))
+
+    print("== UNCOMMITTED: not in git at all, no push would save it ==")
+    print("%-38s %-30s %s" % ("REPO", "BRANCH", "FILES"))
+    for d, r, b in sorted(uncommitted, reverse=True)[:15]:
+        print("%-38s %-30s %d" % (r[:38], b[:30], d))
+    print("\n%d file(s) uncommitted across %d repo(s)."
+          % (sum(x[0] for x in uncommitted), len(uncommitted)))
+
+    print("\n== UNBACKED: current branch is not on any remote ==")
+    print("%-38s %-30s %-12s %s" % ("REPO", "BRANCH", "STATE", "DIRTY"))
+    for r, b, s, d in sorted(unbacked):
+        print("%-38s %-30s %-12s %d" % (r[:38], b[:30], s, d))
+    print("\n%d repo(s) with work in exactly one place." % len(unbacked))
+
+    print("\n== STRAY: commits on old local branches (usually already merged) ==")
+    print("%-38s %10s %10s" % ("REPO", "COMMITS", "BRANCHES"))
+    for r, n, nb in sorted(stray, key=lambda x: -x[1])[:12]:
+        print("%-38s %10d %10d" % (r[:38], n, nb))
+    print("\nHigh branch counts are accumulation, not risk. Prune with")
+    print("`git branch --merged main -d` once main is confirmed pushed.")
+
+
+def cmd_backup(apply_):
+    """Push every local branch that has commits no remote holds."""
+    print("Pushing branches whose commits exist nowhere else.")
+    print("Never force. Never rewrites. Safe to re-run.\n")
+    pushed = skipped = 0
+    for p in local_repos():
+        u = unpushed(p)
+        if not u:
+            continue
+        remote = git(p, "remote", "get-url", "origin")
+        if not remote:
+            print("[SKIP] %-36s no origin remote (%d commits at risk)"
+                  % (rel(p), len(u)))
+            skipped += 1
+            continue
+        # Ask each branch directly whether it carries commits no remote has.
+        # Do not infer from commit decorations: most unpushed commits carry no
+        # ref at all, which silently mislabels them as the current branch.
+        branches = {}
+        for b in git(p, "for-each-ref", "--format=%(refname:short)",
+                     "refs/heads").splitlines():
+            b = b.strip()
+            if not b:
+                continue
+            n = len([x for x in git(p, "rev-list", b, "--not", "--remotes",
+                                    "--", ).splitlines() if x])
+            if n:
+                branches[b] = n
+        if not branches:
+            continue
+        print("%-36s %d commits across %d branch(es)"
+              % (rel(p), sum(branches.values()), len(branches)))
+        for b in sorted(branches, key=lambda x: -branches[x]):
+            if not apply_:
+                print("    would push %-42s (%d commits)" % (b, branches[b]))
+                continue
+            r = sh("git", "-C", p, "push", "-u", "origin", b, timeout=600)
+            ok = r.returncode == 0
+            print("    %s %s" % ("pushed " if ok else "FAILED ", b))
+            if not ok:
+                print("      %s" % r.stderr.strip().splitlines()[-1][:100])
+            pushed += ok
+    print("\n%s" % ("pushed %d branches" % pushed if apply_
+                    else "DRY RUN. add --apply to push."))
+    if skipped:
+        print("%d repo(s) have no remote - see `repo-cleanup audit`." % skipped)
+
+
+def gh_repos():
+    out = []
+    for org in OWNERS:
+        r = sh("gh", "repo", "list", org, "--limit", "200", "--json",
+               "name,owner,isArchived,isPrivate,pushedAt,licenseInfo,description",
+               timeout=180)
+        if r.returncode == 0 and r.stdout.strip():
+            for x in json.loads(r.stdout):
+                x["owner"] = x["owner"]["login"]
+                out.append(x)
+    return out
+
+
+CATALOG = os.path.join(HOME, "Documents", "bettercallzaalwebsite",
+                       "projects", "projects.json")
+
+
+def catalog_names():
+    """Repos advertised on the live site via projects.json.
+
+    That file is the *adoptable projects* list, generated from
+    ZAODEVZ/zabalgames/data/adoptable-projects.json. Archiving a repo makes it
+    read-only, so it can no longer be adopted - the two are incompatible.
+    Never archive one of these without a deliberate decision.
+    """
+    try:
+        d = json.load(open(CATALOG))
+    except Exception:
+        return {}
+    out = {}
+    for g in d.get("groups", []):
+        label = g.get("title") or g.get("name") or "?"
+        for p in (g.get("projects") or g.get("items") or []):
+            blob = json.dumps(p).lower()
+            out.setdefault(label, []).append((p.get("name", ""), blob))
+    return out
+
+
+def cmd_archive(apply_):
+    today = datetime.date.today()
+    cat = catalog_names()
+    localslugs = set()
+    for p in local_repos():
+        u = git(p, "remote", "get-url", "origin")
+        if u:
+            u = u[:-4] if u.endswith(".git") else u
+            localslugs.add(u.split("github.com")[-1].lstrip(":/").lower())
+
+    cands = []
+    for r in gh_repos():
+        slug = "%s/%s" % (r["owner"], r["name"])
+        if r["isArchived"] or slug.lower() in localslugs:
+            continue
+        age = (today - datetime.date.fromisoformat(r["pushedAt"][:10])).days
+        if age > DEAD_DAYS:
+            cands.append((age, slug, r["description"] or ""))
+
+    def listed(name):
+        for label, items in cat.items():
+            for _, blob in items:
+                if name.lower() in blob:
+                    return label
+        return None
+
+    clean = [c for c in cands if not listed(c[1].split("/")[-1])]
+    held = [c for c in cands if listed(c[1].split("/")[-1])]
+
+    print("Archive candidates: %d (dead >%dd, no local clone, not archived)"
+          % (len(cands), DEAD_DAYS))
+    print("Archiving is REVERSIBLE and keeps the URL alive. Never delete.\n")
+
+    if held:
+        print("== HELD BACK: on the live adoptable-projects catalog (%d) ==" % len(held))
+        print("Archiving makes a repo read-only, so it can no longer be adopted.")
+        print("Decide per repo: keep adoptable, or archive AND drop from")
+        print("ZAODEVZ/zabalgames/data/adoptable-projects.json.\n")
+        for age, slug, _ in sorted(held, reverse=True):
+            print("  HELD  %-44s %4dd  shown as: %s"
+                  % (slug, age, listed(slug.split("/")[-1])))
+        print("\n  (use --include-catalog to archive these anyway)\n")
+
+    print("== UNREFERENCED: safe to archive (%d) ==" % len(clean))
+    todo = cands if "--include-catalog" in sys.argv else clean
+    for age, slug, desc in sorted(todo, reverse=True):
+        if not apply_:
+            print("  would archive  %-44s %4dd  %s" % (slug, age, desc[:40]))
+            continue
+        r = sh("gh", "repo", "archive", slug, "--yes", timeout=120)
+        print("  %s %-44s %4dd" % ("archived" if r.returncode == 0
+                                   else "FAILED  ", slug, age))
+    if not apply_:
+        print("\nDRY RUN. add --apply to archive these %d." % len(todo))
+
+
+def cmd_rename():
+    print("Folder renames. Run these BY HAND, and only when no Orca pane,")
+    print("worktree, or running agent is inside the folder.\n")
+    for src, new, why in RENAMES:
+        p = os.path.join(HOME, src)
+        if not os.path.isdir(p):
+            continue
+        dst = os.path.join(os.path.dirname(src), new)
+        print("  # %s" % why)
+        print("  mv ~/%s ~/%s\n" % (src, dst))
+
+
+def cmd_nolicense():
+    rows = [r for r in gh_repos()
+            if not r["isPrivate"] and not r["isArchived"] and not r["licenseInfo"]]
+    print("Public, unarchived, no LICENSE file: %d\n" % len(rows))
+    for r in sorted(rows, key=lambda x: x["pushedAt"], reverse=True):
+        print("  %-46s %s" % ("%s/%s" % (r["owner"], r["name"]),
+                              r["pushedAt"][:10]))
+    print("\nNo --apply here on purpose: license choice is a legal decision.")
+    print("zingfisher is CharmVerse-derived and needs a human call.")
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    cmd, apply_ = argv[0], "--apply" in argv
+    fns = {"audit": lambda: cmd_audit(),
+           "backup": lambda: cmd_backup(apply_),
+           "archive": lambda: cmd_archive(apply_),
+           "rename": lambda: cmd_rename(),
+           "nolicense": lambda: cmd_nolicense()}
+    if cmd not in fns:
+        print("unknown command: %s" % cmd)
+        print(__doc__)
+        return
+    fns[cmd]()
+
+
+if __name__ == "__main__":
+    main()
