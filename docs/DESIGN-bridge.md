@@ -122,6 +122,23 @@ sleeping-laptop failure, plus it requires rebinding the GUI off
 `127.0.0.1` - the one line v1 committed to never touching. B is A with a
 smaller verb list, and it still fails when the Mac is closed.
 
+### 3.2b The GUI port is not a constant - noted, not resolved
+
+A concurrent lane is building `gui/zorca-gui2` on **7778, running beside
+7777** (commits `a5b2786`..`5b2bdfa`, landed while this document was being
+written). Measured: gui2 exposes the identical write surface -
+`/api/resolve`, `/api/focus`, `/api/lane`, `/api/draft` - so the design's
+write path is unaffected in shape.
+
+But the actuator must not hardcode a port. It reads one from config,
+defaulting to whatever `zorca up` starts, and **fails loudly if the port
+answers nothing** rather than silently doing no work. Two GUIs on two ports
+is also a live double-actuator question - if both are running, a lane
+resolved through one should not look pending in the other.
+
+Per playbook rule 5 this lane does not touch `zorca-gui2`; its owner does.
+Flagging it as a finding for that lane and for Zaal.
+
 **What C costs, stated plainly.** One poll interval of latency (10s
 suggested: a lane spawn is not interactive, and 10s keeps the row count
 sane). And the queue is only as available as Supabase. Both are acceptable;
