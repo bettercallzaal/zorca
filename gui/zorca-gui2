@@ -39,7 +39,7 @@ PORT = 7778
 # background and serve the cache instantly.
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
-         "err": "", "err_ts": 0}
+         "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -155,6 +155,27 @@ def load_lanes():
 BOARD_LOG = os.path.expanduser("~/.zao/orca-board.log")
 
 
+def watcher():
+    """Two facts, because either alone lies.
+
+    The watcher only writes when it holds, queues or sends - there is no
+    heartbeat line - so a silent log can mean "quiet" or "dead". Pair the
+    last write with whether the process is actually alive.
+    """
+    alive = False
+    try:
+        alive = subprocess.run(["pgrep", "-f", "orca-board --auto"],
+                               capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        pass
+    ts = 0
+    try:
+        ts = os.path.getmtime(BOARD_LOG)
+    except Exception:
+        pass
+    return alive, ts
+
+
 def tail_log(n=14):
     """Last lines of the watcher log - the HOLD/QUEUE/SENT trail."""
     try:
@@ -190,11 +211,12 @@ def refresh():
     runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
     pending = [g for g in gates if g.get("status") == "pending"]
     resolved = [g for g in gates if g.get("status") != "pending"]
+    w_alive, w_ts = watcher()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
-                     log=tail_log(),
+                     log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      run=runs[0][:120] if runs else "")
 
 
@@ -261,17 +283,57 @@ h1 small { color:var(--dim); letter-spacing:0; font-size:12px;
            vertical-align:bottom; }
 h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
      color:var(--dim); margin:26px 0 10px; }
+#needsyou h2 { margin-top:16px; }
 #freshness { font-size:13px; }
 #freshness .fresh { color:var(--ok); }
 #freshness .aging { color:var(--dim); }
 #freshness .stale { color:var(--gold); font-weight:700; }
 #freshness .at { color:var(--dim); margin-left:8px; }
 
+/* the top bar - answers "what do I need to do" before any scrolling */
+#topbar { margin:14px 0 0; }
+#needbtn { display:block; width:100%; text-align:left; font:inherit;
+           font-size:19px; font-weight:700; letter-spacing:.06em;
+           padding:14px 16px; margin:0 0 10px; border-radius:var(--r);
+           border:1px solid var(--gold); background:var(--panel);
+           color:var(--gold); cursor:pointer; min-height:52px; }
+#needbtn:hover { background:var(--panel-raised); }
+#needbtn.clear { border-color:var(--line); color:var(--dim); font-weight:400; }
+#needbtn .sub { display:block; font-size:12px; font-weight:400;
+                letter-spacing:0; color:var(--dim); margin-top:3px; }
+#strip { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+.cell { background:var(--panel); border:1px solid var(--line);
+        border-radius:var(--r); padding:8px 11px; min-width:0; }
+.cell .k { display:block; font-size:11px; letter-spacing:.14em;
+           text-transform:uppercase; color:var(--dim); }
+.cell .v { display:block; font-size:13px; margin-top:2px; }
+.cell b { font-weight:700; }
+.good { color:var(--ok); } .bad { color:var(--warn); } .flag { color:var(--gold); }
+.nil { color:var(--dim); }
+
+/* the action list - one ordered queue, not three panels to read */
+.act { background:var(--panel); border:1px solid var(--line-interactive);
+       border-left:3px solid var(--line); border-radius:var(--r);
+       padding:12px 14px; margin-bottom:10px; }
+.act.t0, .act.t1 { border-left-color:var(--warn); }
+.act.t2, .act.t4 { border-left-color:var(--gold); }
+.act.t3 { border-left-color:var(--info); }
+.actline { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;
+           margin-bottom:7px; }
+.tier { font-size:11px; letter-spacing:.14em; font-weight:700; }
+.t0 .tier, .t1 .tier { color:var(--warn); }
+.t2 .tier, .t4 .tier { color:var(--gold); }
+.t3 .tier { color:var(--info); }
+.who { font-weight:600; }
+.why { color:var(--dim); font-size:13px; }
+.age { color:var(--dim); font-size:12px; margin-left:auto; }
+.acts { margin-top:4px; }
+
 /* rail 1 - the only thing that may claim your attention */
 #needsyou { border-left:3px solid var(--gold); padding-left:14px;
             margin:18px 0 0 -17px; }
-#needsyou h2 { color:var(--gold); font-size:15px; letter-spacing:.10em;
-               margin-top:14px; }
+#needsyou h2 { color:var(--gold); font-size:13px; letter-spacing:.14em;
+               margin-top:16px; }
 #needsyou.clear { border-left-color:var(--line); }
 #needsyou.clear h2 { color:var(--dim); }
 
@@ -281,15 +343,12 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 .card[onclick]:hover { background:var(--panel-raised); }
 .gate { border-left:3px solid var(--gold); }
 .gate.held { border-left-color:var(--warn); }
-.heldlabel { color:var(--warn); font-size:13px; font-weight:700;
-             margin-bottom:8px; }
 .dtext { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;
          overflow:hidden; cursor:pointer; }
 .dtext.open { display:block; -webkit-line-clamp:none; }
 .dmore { color:var(--dim); font-size:12px; cursor:pointer; margin-bottom:8px;
          display:inline-block; }
 .dmore:hover { color:var(--gold); }
-.gate .q { margin-bottom:10px; }
 button, .gate input[type=text] {
   font:inherit; margin:3px 6px 3px 0; padding:6px 12px; border-radius:7px;
   border:1px solid var(--line-interactive); background:var(--navy);
@@ -297,7 +356,7 @@ button, .gate input[type=text] {
 button:hover { border-color:var(--gold); color:var(--gold); }
 button[disabled] { opacity:.55; cursor:default; }
 button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
-.gate input[type=text] { width:58%; cursor:text; }
+input[type=text] { width:58%; cursor:text; }
 
 /* rail 2 - the wall */
 .pane { display:flex; gap:12px; align-items:baseline; padding:9px 14px; }
@@ -333,10 +392,10 @@ button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
 .stamp { color:var(--dim); font-size:12px; }
 @media (max-width:720px){
   body { font-size:14px; padding:14px; }
-  header { margin-left:-11px; }
-  /* nowrap + ellipsis needs a definite width; a percentage resolves
-     against a shrink-to-fit h1 and overflows the viewport instead. */
-  h1 small { display:block; margin:2px 0 0; max-width:calc(100vw - 44px); }
+  header { margin-left:-11px; gap:10px; }
+  h1 { font-size:17px; }
+  /* the run string lives in the fold on a phone - see #runref */
+  h1 small { display:none; }
   #needsyou { margin-left:-15px; padding-left:12px; }
   /* two lines: repo + chip, then ctx + detail. Nothing may push the page
      sideways at 390px. */
@@ -346,16 +405,20 @@ button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
   .chip { flex:0 0 auto; }
   .ctx { flex:0 0 auto; }
   .detail { flex:1 1 100%; min-width:0; }
-  button, .gate input[type=text] { min-height:38px; }
+  button, input[type=text] { min-height:38px; }
   /* the parked-lane button opts out of min-height on desktop; on a phone
      it is still a tap target */
   button.mini { min-height:38px; }
-  .gate input[type=text] { width:100%; }
+  input[type=text] { width:100%; }
   /* A rank<=2 lane is already a card in rail 1, directly above. On a phone
      the wall's copy of it is a whole card of scroll for nothing, so the
      wall drops the duplicate. On desktop both stay, so the wall reads as a
      complete picture of what is running. */
   #panes .pane.dup { display:none; }
+  #strip { grid-template-columns:1fr 1fr; }
+  #needbtn { font-size:17px; }
+  .actline { gap:8px; }
+  .age { margin-left:0; }
   .task { flex-wrap:wrap; }
   .task .st { min-width:auto; }
   .grid { gap:14px; }
@@ -370,11 +433,16 @@ button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
  <div id="freshness"></div>
 </header>
 
+<div id="topbar">
+ <button id="needbtn" onclick='document.getElementById("needsyou")
+   .scrollIntoView({behavior:"smooth", block:"start"})'>
+   <span id="needcount">-</span><span class="sub" id="needsub"></span></button>
+ <div id="strip"></div>
+</div>
+
 <section id="needsyou">
- <h2><span id="needcount"></span></h2>
- <div id="gates"></div>
- <div id="drafts"></div>
- <div id="hotpanes"></div>
+ <h2>Do these in order</h2>
+ <div id="actions"></div>
 </section>
 
 <section id="wall">
@@ -384,6 +452,7 @@ button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
 
 <details id="ref">
  <summary>Tasks, resolved gates, parked lanes, watcher trail</summary>
+ <div class="stamp" id="runref"></div>
  <div class="grid">
   <div><h2>Tasks</h2><div class="card" id="tasks"></div></div>
   <div>
@@ -434,6 +503,126 @@ function danger(reason){
   const m = DANGER.exec(reason || "");
   return m ? m[0].toLowerCase() : "";
 }
+/* Gate timestamps arrive as "YYYY-MM-DD HH:MM[:SS]"; anything else is
+   treated as unknown age rather than guessed at. */
+function parseTs(v){
+  if (!v) return 0;
+  const t = Date.parse(String(v).replace(" ", "T"));
+  return isNaN(t) ? 0 : t / 1000;
+}
+
+/* One queue out of three sources. Order is irreversibility first, then
+   oldest - a send that cannot be taken back outranks a lane that is merely
+   blocked, and an unknown age sorts last rather than pretending to be new. */
+function actions(s){
+  const out = [];
+  (s.drafts || []).forEach(d => {
+    const hit = danger((d.reason || "") + " " + (d.text || ""));
+    out.push({
+      tier: hit ? 0 : 3,
+      tag: hit ? "IRREVERSIBLE" : "SEND",
+      who: d.repo,
+      why: hit ? "danger word: " + hit : (d.reason || "queued draft"),
+      ts: d.ts || 0,
+      text: d.text || "",
+      buttons: `<button onclick='sendDraft("${d.id}", this, ${hit ? "true" : "false"})'>Send</button>
+        <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>`
+    });
+  });
+  (s.panes || []).filter(p => p.rank === 0).forEach(p => {
+    out.push({
+      tier: 1, tag: "CONTEXT", who: p.repo,
+      why: p.ctx == null ? "context critical" : p.ctx + "% - hand off now",
+      ts: 0, text: p.question || p.tail || "",
+      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+    });
+  });
+  (s.gates || []).forEach(g => {
+    const opts = (g.options || []).map(o =>
+      `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("");
+    const close = (g.options || []).length === 0
+      ? `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."}, this)'>close - addressed</button>`
+      : "";
+    out.push({
+      tier: 2, tag: "BLOCKED", who: "decision gate",
+      why: "a lane is waiting on your call",
+      ts: parseTs(g.created_at), text: g.question || "",
+      buttons: opts + close +
+        `<input type="text" id="in-${g.id}" placeholder="or type an answer">
+         <button onclick='post("/api/resolve",{id:"${g.id}",
+           resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>`
+    });
+  });
+  (s.panes || []).filter(p => p.rank === 1 || p.rank === 2).forEach(p => {
+    out.push({
+      tier: 4, tag: "ASKED", who: p.repo, why: esc(p.state),
+      ts: 0, text: p.question || p.tail || "",
+      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+    });
+  });
+  const LAST = 1e18;
+  out.sort((a, b) => (a.tier - b.tier) || ((a.ts || LAST) - (b.ts || LAST)));
+  return out;
+}
+
+function actRow(a){
+  const age = a.ts ? ago(Date.now()/1000 - a.ts) + " old" : "";
+  return `<div class="act t${a.tier}">
+    <div class="actline">
+      <span class="tier">${a.tag}</span>
+      <span class="who">${esc(a.who)}</span>
+      <span class="why">${a.why}</span>
+      <span class="age">${age}</span>
+    </div>
+    <div class="detail dtext" style="white-space:normal"
+      onclick='expand(this)'>${esc(a.text)}</div>
+    <span class="dmore" onclick='expand(this.previousElementSibling, this)'
+      >show all &darr;</span>
+    <div class="acts">${a.buttons}</div>
+  </div>`;
+}
+
+/* The fleet, four numbers wide. A zero that should be zero renders dim; a
+   number that means something is wrong renders warn or gold, so the strip
+   is scannable without reading it. */
+function strip(s){
+  const P = s.panes || [], T = s.tasks || [];
+  const n = r => P.filter(p => p.rank === r).length;
+  const st = x => T.filter(t => t.status === x).length;
+  const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
+  let wcls = "good", wtxt = "-";
+  if (!s.watcher_alive) { wcls = "bad"; wtxt = "DOWN"; }
+  else if (!s.watcher_ts) { wcls = "flag"; wtxt = "no log yet"; }
+  else {
+    const w = Date.now()/1000 - s.watcher_ts;
+    wtxt = ago(w) + " ago";
+    wcls = w > 300 ? "flag" : "good";
+  }
+  const cells = [
+    ["lanes", `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
+      `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
+      `<b class="nil">${n(6)}</b> free`],
+    ["tasks", `<b class="good">${st("completed")}</b> done &middot; ` +
+      `<b class="flag">${st("ready")}</b> ready &middot; ` +
+      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
+    ["ctx critical", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
+      (critical ? " needs a handoff" : " - none near full")],
+    ["watcher", `<b class="${wcls}">${wtxt}</b>`]
+  ];
+  document.getElementById("strip").innerHTML = cells.map(([k, v]) =>
+    `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+}
+
+/* Only offer "show all" where there is more to show. */
+function trimToggles(){
+  document.querySelectorAll(".dtext").forEach(b => {
+    const more = b.nextElementSibling;
+    if (!more || !more.classList.contains("dmore")) return;
+    more.style.display = b.classList.contains("open")
+      || b.scrollHeight > b.clientHeight + 1 ? "inline-block" : "none";
+  });
+}
+
 function expand(box, tag){
   const open = box.classList.toggle("open");
   const t = tag || box.nextElementSibling;
@@ -484,49 +673,25 @@ function paneRow(p, dup){
 async function load(){
   const s = await (await fetch("/api/state")).json();
   document.getElementById("run").textContent = s.run;
+  document.getElementById("runref").textContent = s.run;
   freshness(s);
 
-  /* --- rail 1: gates, drafts, and only the panes that asked you ------ */
-  const hot = s.panes.filter(p => p.rank <= 2);
-  const need = s.gates.length + s.drafts.length + hot.length;
+  /* --- the top bar: the whole answer to "what do I need to do" ------ */
+  const acts = actions(s);
+  const need = acts.length;
+  const urgent = acts.filter(a => a.tier <= 1).length;
   document.getElementById("needcount").textContent =
-    need === 0 ? "0 need you - the wall is working" : need + " need you";
+    need === 0 ? "0 NEED YOU" : need + " NEED YOU";
+  document.getElementById("needsub").textContent = need === 0
+    ? "the wall is working - nothing is waiting on you"
+    : urgent + " irreversible or losing context, " + (need - urgent) + " the rest"
+      + " - tap to jump";
+  document.getElementById("needbtn").classList.toggle("clear", need === 0);
   document.getElementById("needsyou").classList.toggle("clear", need === 0);
-
-  document.getElementById("gates").innerHTML = s.gates.map(g => `
-    <div class="card gate">
-      <div class="q" style="white-space:pre-wrap">${esc(g.question)}</div>
-      <div class="stamp" style="margin-bottom:8px">filed ${esc(g.created_at||"")}
-        &middot; task ${esc(g.task_id||"")}</div>
-      <div>
-        ${g.options.map(o=>`<button onclick='post("/api/resolve",
-          {id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("")}
-        ${g.options.length==0?`<button onclick='post("/api/resolve",
-          {id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."}, this)'
-          >close - addressed</button>`:""}
-        <input type="text" id="in-${g.id}" placeholder="or type an answer">
-        <button onclick='post("/api/resolve",{id:"${g.id}",
-          resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>
-      </div>
-    </div>`).join("");
-
-  document.getElementById("drafts").innerHTML = s.drafts.map(d => {
-    const hit = danger(d.reason);
-    return `
-    <div class="card gate${hit ? " held" : ""}">
-      <div class="q"><b>${esc(d.repo)}</b>
-        <span class="stamp">${esc(d.reason)}</span></div>
-      ${hit ? `<div class="heldlabel">HELD - danger word: ${esc(hit)}</div>` : ""}
-      <div class="detail dtext" style="white-space:normal"
-        onclick='expand(this)'>${esc(d.text)}</div>
-      <span class="dmore" onclick='expand(this.previousElementSibling, this)'
-        >show all &darr;</span><br>
-      <button onclick='sendDraft("${d.id}", this, ${hit ? "true" : "false"})'>Send</button>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>
-    </div>`;
-  }).join("");
-
-  document.getElementById("hotpanes").innerHTML = hot.map(paneRow).join("");
+  strip(s);
+  document.getElementById("actions").innerHTML = acts.map(actRow).join("")
+    || '<div class="card">nothing needs you</div>';
+  trimToggles();
 
   /* --- rail 2: the wall. Free and finished lanes collapse into the
          summary; a card here means a lane that is actually running. --- */
@@ -574,9 +739,9 @@ async function load(){
     return `<div style="color:${c}">${tag} ${esc(l)}</div>`;
   }).join("") || '<span class="stamp">watcher not running</span>';
 }
-/* Focus, never activate. 1-9 lands you on the nth option of the first
-   pending gate; Enter does the rest natively, so a stray keystroke can
-   never resolve a gate. */
+/* Focus, never activate. 1-9 lands you on the nth control of the first
+   action row; Enter does the rest natively, so a stray keystroke can never
+   resolve a gate or send a draft. */
 document.addEventListener("keydown", e => {
   const a = document.activeElement;
   if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
@@ -588,9 +753,9 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.key >= "1" && e.key <= "9") {
-    const gate = document.querySelector("#gates .gate");
-    if (!gate) return;
-    const btn = gate.querySelectorAll("button")[Number(e.key) - 1];
+    const row = document.querySelector("#actions .act");
+    if (!row) return;
+    const btn = row.querySelectorAll("button")[Number(e.key) - 1];
     if (btn) { btn.focus(); e.preventDefault(); }
   }
 });
