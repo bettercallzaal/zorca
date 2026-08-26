@@ -41,7 +41,8 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0}
 LOCK = threading.Lock()
-QUEUE = os.path.expanduser("~/.zao/orca-drafts.json")
+QUEUE = os.environ.get("ZORCA_QUEUE",
+                       os.path.expanduser("~/.zao/orca-drafts.json"))
 # Gate ids already resolved this process - the server-side double-tap guard.
 RESOLVED = set()
 
@@ -275,6 +276,8 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 .card[onclick]:hover { background:var(--panel-raised); }
 .gate { border-left:3px solid var(--gold); }
 .gate.held { border-left-color:var(--warn); }
+.heldlabel { color:var(--warn); font-size:13px; font-weight:700;
+             margin-bottom:8px; }
 .gate .q { margin-bottom:10px; }
 button, .gate input[type=text] {
   font:inherit; margin:3px 6px 3px 0; padding:6px 12px; border-radius:7px;
@@ -282,6 +285,7 @@ button, .gate input[type=text] {
   color:var(--text); cursor:pointer; min-height:34px; }
 button:hover { border-color:var(--gold); color:var(--gold); }
 button[disabled] { opacity:.55; cursor:default; }
+button.mini { color:var(--gold); padding:2px 10px; min-height:0; }
 .gate input[type=text] { width:58%; cursor:text; }
 
 /* rail 2 - the wall */
@@ -316,6 +320,32 @@ button[disabled] { opacity:.55; cursor:default; }
 .st-blocked{color:var(--warn)} .st-dispatched{color:var(--info)}
 .st-pending{color:var(--dim)}
 .stamp { color:var(--dim); font-size:12px; }
+@media (max-width:720px){
+  body { font-size:14px; padding:14px; }
+  header { margin-left:-11px; }
+  #needsyou { margin-left:-15px; padding-left:12px; }
+  /* two lines: repo + chip, then ctx + detail. Nothing may push the page
+     sideways at 390px. */
+  .pane { flex-wrap:wrap; gap:6px 10px; min-height:38px; }
+  .repo, .chip, .ctx, .state { min-width:auto; }
+  .repo { flex:1 1 auto; }
+  .chip { flex:0 0 auto; }
+  .ctx { flex:0 0 auto; }
+  .detail { flex:1 1 100%; min-width:0; }
+  button, .gate input[type=text] { min-height:38px; }
+  /* the parked-lane button opts out of min-height on desktop; on a phone
+     it is still a tap target */
+  button.mini { min-height:38px; }
+  .gate input[type=text] { width:100%; }
+  /* A rank<=2 lane is already a card in rail 1, directly above. On a phone
+     the wall's copy of it is a whole card of scroll for nothing, so the
+     wall drops the duplicate. On desktop both stay, so the wall reads as a
+     complete picture of what is running. */
+  #panes .pane.dup { display:none; }
+  .task { flex-wrap:wrap; }
+  .task .st { min-width:auto; }
+  .grid { gap:14px; }
+}
 #toast { position:fixed; bottom:22px; right:22px; background:var(--gold);
          color:var(--navy); padding:10px 16px; border-radius:8px;
          font-weight:700; display:none; z-index:9; }
@@ -381,6 +411,25 @@ function toast(msg, ok){
   setTimeout(()=>t.style.display="none", ok ? 1800 : 4000);
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+
+/* ZORCA already holds danger-worded drafts on rail 1. The GUI was the one
+   surface where that hold was invisible - this only renders it. No override
+   is added: a held draft is still sendable, it just costs a second tap. */
+const DANGER = /license|publish|delete|archive|push|merge|rotate|credential/i;
+function danger(reason){
+  const m = DANGER.exec(reason || "");
+  return m ? m[0].toLowerCase() : "";
+}
+function sendDraft(id, el, held){
+  if (held && el.dataset.armed !== "1") {
+    el.dataset.armed = "1";
+    el.textContent = "confirm send";
+    setTimeout(()=>{ if (el.dataset.armed === "1") {
+      el.dataset.armed = ""; el.textContent = "Send"; } }, 6000);
+    return;
+  }
+  post("/api/draft", {id: id, action: "send"}, el);
+}
 function ago(sec){
   if (sec < 90) return Math.round(sec) + "s";
   if (sec < 5400) return Math.round(sec/60) + "m";
@@ -401,11 +450,11 @@ function freshness(s){
 
 /* A pane row. The state string is always rendered as text - the chip colour
    is the redundant channel, never the only one. */
-function paneRow(p){
+function paneRow(p, dup){
   const hot = p.ctx != null && p.ctx >= 85;
   const ctx = p.ctx == null ? "-"
             : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
-  return `<div class="card pane" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
+  return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
       <span class="repo">${esc(p.repo)}</span>
       <span class="chip r${p.rank}">${esc(p.state)}</span>
       <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
@@ -442,14 +491,18 @@ async function load(){
       </div>
     </div>`).join("");
 
-  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
-    <div class="card gate">
+  document.getElementById("drafts").innerHTML = s.drafts.map(d => {
+    const hit = danger(d.reason);
+    return `
+    <div class="card gate${hit ? " held" : ""}">
       <div class="q"><b>${esc(d.repo)}</b>
         <span class="stamp">${esc(d.reason)}</span></div>
+      ${hit ? `<div class="heldlabel">HELD - danger word: ${esc(hit)}</div>` : ""}
       <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"}, this)'>Send</button>
+      <button onclick='sendDraft("${d.id}", this, ${hit ? "true" : "false"})'>Send</button>
       <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   document.getElementById("hotpanes").innerHTML = hot.map(paneRow).join("");
 
@@ -463,7 +516,8 @@ async function load(){
     `${working} working &middot; ${free} free &middot; ` +
     `<span class="${idle ? "idle" : ""}">${idle} idle</span>`;
   document.getElementById("panes").innerHTML =
-    live.map(paneRow).join("") || '<div class="card">no live panes</div>';
+    live.map(p => paneRow(p, p.rank <= 2)).join("")
+    || '<div class="card">no live panes</div>';
   document.getElementById("coldpanes").innerHTML =
     s.panes.filter(p => p.rank >= 5).map(paneRow).join("")
     || '<span class="stamp">none</span>';
@@ -484,19 +538,40 @@ async function load(){
       <span>${esc(g.question.slice(0,70))} &rarr; <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
-    <div class="task"><button onclick='post("/api/lane",{i:${i}}, this)'
-      style="color:var(--gold);padding:2px 10px;min-height:0">open</button>
+    <div class="task"><button class="mini"
+      onclick='post("/api/lane",{i:${i}}, this)'>open</button>
       <span>${esc(l.name)}</span>
       <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
   document.getElementById("wlog").innerHTML = s.log.map(l => {
-    let c = "var(--dim)";
-    if (l.includes(" SENT ")) c = "var(--ok)";
-    if (l.includes(" HOLD ") || l.includes("QUEUE")) c = "var(--gold)";
-    if (l.includes("DROPPED") || l.includes("failed")) c = "var(--warn)";
-    return `<div style="color:${c}">${esc(l)}</div>`;
+    // The two-character prefix is the real signal; colour is the echo.
+    let c = "var(--dim)", tag = "..";
+    if (l.includes(" SENT ")) { c = "var(--ok)"; tag = ">>"; }
+    if (l.includes(" HOLD ") || l.includes("QUEUE")) { c = "var(--gold)"; tag = "!!"; }
+    if (l.includes("DROPPED") || l.includes("failed")) { c = "var(--warn)"; tag = "xx"; }
+    return `<div style="color:${c}">${tag} ${esc(l)}</div>`;
   }).join("") || '<span class="stamp">watcher not running</span>';
 }
+/* Focus, never activate. 1-9 lands you on the nth option of the first
+   pending gate; Enter does the rest natively, so a stray keystroke can
+   never resolve a gate. */
+document.addEventListener("keydown", e => {
+  const a = document.activeElement;
+  if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "?") {
+    const r = document.getElementById("ref");
+    r.open = !r.open;
+    e.preventDefault();
+    return;
+  }
+  if (e.key >= "1" && e.key <= "9") {
+    const gate = document.querySelector("#gates .gate");
+    if (!gate) return;
+    const btn = gate.querySelectorAll("button")[Number(e.key) - 1];
+    if (btn) { btn.focus(); e.preventDefault(); }
+  }
+});
 load(); setInterval(load, 15000);
 </script></body></html>"""
 
