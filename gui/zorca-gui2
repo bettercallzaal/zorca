@@ -39,7 +39,8 @@ PORT = 7778
 # background and serve the cache instantly.
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
-         "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0}
+         "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
+         "daily": [], "gitlog": []}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -155,6 +156,87 @@ def load_lanes():
 BOARD_LOG = os.path.expanduser("~/.zao/orca-board.log")
 
 
+VAULT_DAILY = os.environ.get(
+    "ZORCA_VAULT_DAILY", os.path.expanduser("~/zao-vault/daily"))
+
+
+def daily_events(n=12):
+    """The human-readable events feed: `## HH:MM - title` in today's daily.
+
+    Timestamps are PARSED, never string-compared (zaal-dotfiles a979b96: a
+    malformed value sorts above or below a cutoff by ASCII accident, and one
+    of those directions silently drops the row). A heading whose time will
+    not parse keeps ts=0 and is still shown, labelled - dropping an event
+    from a "what happened" feed is the one failure this surface cannot have.
+    """
+    day = time.strftime("%Y-%m-%d")
+    path = os.path.join(VAULT_DAILY, day + ".md")
+    rows = []
+    try:
+        lines = open(path).read().splitlines()
+    except Exception:
+        return []
+    for i, ln in enumerate(lines):
+        if not ln.startswith("## "):
+            continue
+        head = ln[3:].strip()
+        stamp, _, title = head.partition(" - ")
+        ts = 0
+        try:
+            hh, mm = stamp.split(":")
+            lt = time.localtime()
+            ts = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                              int(hh), int(mm), 0, 0, 0, -1))
+        except Exception:
+            title, ts = head, 0
+        # "absorb tick" twelve times in a row is a heading, not an event.
+        # The first bullet under it is what actually happened.
+        detail = ""
+        for nxt in lines[i + 1:i + 8]:
+            if nxt.startswith("## "):
+                break
+            t = nxt.strip().lstrip("-*").strip()
+            if t:
+                detail = t
+                break
+        rows.append(dict(ts=ts, text=title or head, detail=detail,
+                         src="vault daily " + day + ".md"))
+    rows.sort(key=lambda r: r["ts"], reverse=True)
+    seen, out = set(), []
+    for r in rows:
+        key = (r["text"], r["detail"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out[:n]
+
+
+def git_activity(cwds, n=12):
+    """Last commit per live worktree - proof of work, not pane text.
+
+    A pane's tail says what an agent is saying; a commit says what it landed.
+    """
+    rows, seen = [], set()
+    for cwd in cwds:
+        if not cwd or cwd in seen or not os.path.isdir(cwd):
+            continue
+        seen.add(cwd)
+        out = sh(["git", "-C", cwd, "log", "-1", "--format=%ct\x1f%h\x1f%s"],
+                 timeout=10)
+        parts = out.strip().split("\x1f")
+        if len(parts) != 3:
+            continue
+        try:
+            ts = int(parts[0])
+        except ValueError:
+            continue
+        rows.append(dict(ts=ts, repo=os.path.basename(cwd), sha=parts[1],
+                         text=parts[2], src="git -C " + cwd + " log -1"))
+    rows.sort(key=lambda r: r["ts"], reverse=True)
+    return rows[:n]
+
+
 def watcher():
     """Two facts, because either alone lies.
 
@@ -212,11 +294,14 @@ def refresh():
     pending = [g for g in gates if g.get("status") == "pending"]
     resolved = [g for g in gates if g.get("status") != "pending"]
     w_alive, w_ts = watcher()
+    gits = git_activity([p.get("cwd") for p in board])
+    daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
+                     daily=daily, gitlog=gits,
                      run=runs[0][:120] if runs else "")
 
 
@@ -310,6 +395,29 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 .cell b { font-weight:700; }
 .good { color:var(--ok); } .bad { color:var(--warn); } .flag { color:var(--gold); }
 .nil { color:var(--dim); }
+
+.cell .src { display:block; font-size:10px; color:var(--dim); opacity:.75;
+             margin-top:3px; line-height:1.3; }
+
+/* what happened since you last looked - the feed, not the panes */
+#since { margin-top:22px; }
+.ev { display:flex; gap:8px 10px; align-items:baseline; flex-wrap:wrap;
+      background:var(--panel); border:1px solid var(--line);
+      border-left:3px solid var(--line); border-radius:var(--r);
+      padding:7px 12px; margin-bottom:6px; }
+.ev.new { border-left-color:var(--gold); }
+.evtime { color:var(--dim); font-size:12px; min-width:44px; }
+.evtag { font-size:11px; letter-spacing:.12em; color:var(--info);
+         min-width:42px; }
+.ev.git .evtag { color:var(--ok); }
+.evnew { font-size:10px; letter-spacing:.12em; color:var(--gold);
+         font-weight:700; }
+.evtext { flex:1 1 60%; min-width:0; font-size:13px;
+          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+          overflow:hidden; }
+.evsrc { flex:1 1 100%; font-size:10px; color:var(--dim); opacity:.75;
+         overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+         min-width:0; }
 
 /* the action list - one ordered queue, not three panels to read */
 .act { background:var(--panel); border:1px solid var(--line-interactive);
@@ -416,6 +524,7 @@ input[type=text] { width:58%; cursor:text; }
      complete picture of what is running. */
   #panes .pane.dup { display:none; }
   #strip { grid-template-columns:1fr 1fr; }
+  #sincecount { display:block; margin-top:2px; }
   #needbtn { font-size:17px; }
   .actline { gap:8px; }
   .age { margin-left:0; }
@@ -439,6 +548,11 @@ input[type=text] { width:58%; cursor:text; }
    <span id="needcount">-</span><span class="sub" id="needsub"></span></button>
  <div id="strip"></div>
 </div>
+
+<section id="since">
+ <h2>Since you last looked <span class="stamp" id="sincecount"></span></h2>
+ <div id="feed"></div>
+</section>
 
 <section id="needsyou">
  <h2>Do these in order</h2>
@@ -503,6 +617,64 @@ function danger(reason){
   const m = DANGER.exec(reason || "");
   return m ? m[0].toLowerCase() : "";
 }
+/* The "last look" mark. Read once per page load: the value in storage is
+   the PREVIOUS visit, and now is stamped over it immediately, so polling
+   every 15s does not erase the marker mid-session. Storage can throw
+   (private window, blocked site data) - a feed with no NEW marks is still a
+   feed, so every access is guarded and failure is silent by design. */
+let SEEN = null;
+function seenAt(){
+  if (SEEN !== null) return SEEN;
+  let prev = 0;
+  try { prev = Number(localStorage.getItem("zorca.seen")) || 0; } catch (e) {}
+  try { localStorage.setItem("zorca.seen", String(Math.floor(Date.now()/1000))); } catch (e) {}
+  SEEN = prev;
+  return SEEN;
+}
+
+/* One feed out of two sources, newest first. An event whose time would not
+   parse server-side arrives with ts 0: it is never called new, and it is
+   never dropped - a "what happened" surface that hides an event it could
+   not date is worse than one that admits it (parse, do not sort - a979b96). */
+function feed(s){
+  const rows = [];
+  (s.daily || []).forEach(d => rows.push({
+    ts: d.ts, tag: "vault", kind: "vault",
+    text: d.detail ? d.text + " - " + d.detail : d.text, src: d.src }));
+  (s.gitlog || []).forEach(g => rows.push({
+    ts: g.ts, tag: "git", kind: "git",
+    text: g.repo + " " + g.sha + " " + g.text, src: g.src }));
+  rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return rows;
+}
+
+function renderFeed(s){
+  const all = feed(s), mark = seenAt();
+  const fresh = all.filter(r => r.ts && r.ts > mark).length;
+  document.getElementById("sincecount").textContent =
+    mark === 0 ? "first look on this browser - showing the latest"
+    : fresh === 0 ? "nothing new since " + new Date(mark*1000).toLocaleTimeString()
+    : fresh + " new since " + new Date(mark*1000).toLocaleTimeString();
+  const show = all.slice(0, window.innerWidth <= 720 ? 4 : 6);
+  document.getElementById("feed").innerHTML = show.map(r => {
+    const isNew = r.ts && r.ts > mark;
+    const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
+                      : "??:??";
+    return `<div class="ev ${r.kind}${isNew ? " new" : ""}">
+      <span class="evtime">${when}</span>
+      <span class="evtag">${r.tag}</span>
+      ${isNew ? '<span class="evnew">NEW</span>' : ""}
+      <span class="evtext">${esc(r.text)}</span>
+      <span class="evsrc">${esc(r.ts ? r.src : r.src + " (time unreadable - shown anyway)")}</span>
+    </div>`;
+  }).join("") || '<div class="card">no events today - ' +
+    'vault daily log and worktree commits are both empty</div>';
+  if (all.length > show.length) {
+    document.getElementById("feed").innerHTML +=
+      `<div class="stamp">${all.length - show.length} older not shown</div>`;
+  }
+}
+
 /* Gate timestamps arrive as "YYYY-MM-DD HH:MM[:SS]"; anything else is
    treated as unknown age rather than guessed at. */
 function parseTs(v){
@@ -599,18 +771,19 @@ function strip(s){
     wcls = w > 300 ? "flag" : "good";
   }
   const cells = [
-    ["lanes", `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
+    ["lanes", "orca-board --json", `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
       `<b class="nil">${n(6)}</b> free`],
-    ["tasks", `<b class="good">${st("completed")}</b> done &middot; ` +
+    ["tasks", "orchestration.db (read-only)", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
       `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
-    ["ctx critical", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
+    ["ctx critical", "orca-board --json, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
       (critical ? " needs a handoff" : " - none near full")],
-    ["watcher", `<b class="${wcls}">${wtxt}</b>`]
+    ["watcher", "~/.zao/orca-board.log + pgrep", `<b class="${wcls}">${wtxt}</b>`]
   ];
-  document.getElementById("strip").innerHTML = cells.map(([k, v]) =>
-    `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+  document.getElementById("strip").innerHTML = cells.map(([k, src, v]) =>
+    `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
+    `<span class="src">${esc(src)}</span></div>`).join("");
 }
 
 /* Only offer "show all" where there is more to show. */
@@ -689,6 +862,7 @@ async function load(){
   document.getElementById("needbtn").classList.toggle("clear", need === 0);
   document.getElementById("needsyou").classList.toggle("clear", need === 0);
   strip(s);
+  renderFeed(s);
   document.getElementById("actions").innerHTML = acts.map(actRow).join("")
     || '<div class="card">nothing needs you</div>';
   trimToggles();
