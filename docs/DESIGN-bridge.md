@@ -694,3 +694,64 @@ mattering. It stays written down as a belief, never cited as a finding, and
 if a future design puts weight back on it, it gets measured then.
 
 Related: section 11.3 (where it mattered), section 12 (which removed it).
+
+## 14. Handoff - lane closed 2026-08-26
+
+Everything below is recoverable from this file alone. Scrollback is not
+required and should not be trusted; that is the whole reason this document
+carries the state rather than the pane.
+
+### Where the work is
+
+**All local. `origin` is untouched** and still sits at `9b64e28`, the commit
+it held before this lane started - so the diff for this lane is exactly
+`git log 9b64e28..HEAD`. Push is gated and was never performed. Nothing was
+deleted at any point.
+
+| What | Where |
+|---|---|
+| The design, v3 | `docs/DESIGN-bridge.md` - live plan is **section 12** ( section 8 superseded) |
+| Mac-side drain | `bin/zorca-actuator` |
+| VPS-side append + record contract | `bin/zorca-lane-enqueue` |
+| Test suite, 16 cases | `bin/zorca-actuator-test` - run it first, it needs no Orca |
+| Task report | `.handoffs/DONE.md` |
+
+### Before anything runs - two things, both Zaal's
+
+1. **The SSH direction.** `queue.mode` supports `ssh` and `local` and
+   **defaults to neither**. The measured position: VPS-to-Mac push cannot
+   work today - Tailscale reports stopped and nothing listens on 22 - so
+   `ssh` (Mac dials out, queue file on the VPS) is the only variant that runs
+   now and the only one that literally keeps zero inbound ports on the Mac.
+2. **The config file** at `~/.zao/zorca-actuator.json`. It does not exist.
+   The actuator refuses to start without it and names every missing key at
+   once. There is no default port: **7777 and 7778 both answer**, so guessing
+   was never available.
+
+The actuator is deliberately **not** wired into `zorca up`. It spends money,
+has no config, and the direction is unratified - three independent reasons.
+
+### The channel rule, which is measurement not preference
+
+This route truncated the **head** of four inbound messages and preserved the
+**tail** every time. Both messages that carried their instruction at the tail
+arrived intact and actionable; the ~2KB message with its corrections at the
+head lost them. On this channel **constraint-last is the rule**. It is the
+`terminal send` head-loss the playbook already records, and it is reliable
+here rather than intermittent.
+
+Corollary worth keeping: every truncation was recoverable because this
+document held the state. A pane that loses its brief can re-read a committed
+file. One that only had the message is finished.
+
+### Untouched, on instruction - do not assume otherwise
+
+`zorca-gui2` and its files. `bin/zorca`. The delete call. Issue template
+placement. Each was left alone deliberately, not overlooked.
+
+### Open, and closed-with-a-label
+
+Section 10 carries all six. Two are closed at a narrower evidence level than
+was asked for, and that is the point of them: **q4** is confirmed via
+orchestrator relay, **not** Zaal-direct; **q5** is closed deliberately
+unmeasured because nothing rests on it any more (section 13).
