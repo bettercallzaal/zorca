@@ -265,10 +265,15 @@ async function load(){
   document.getElementById("gcount").textContent = "("+s.gates.length+")";
   document.getElementById("gates").innerHTML = s.gates.map(g => `
     <div class="card gate">
-      <div class="q">${esc(g.question)}</div>
+      <div class="q" style="white-space:pre-wrap">${esc(g.question)}</div>
+      <div class="stamp" style="margin-bottom:8px">filed ${esc(g.created_at||"")}
+        · task ${esc(g.task_id||"")}</div>
       <div>
         ${g.options.map(o=>`<button onclick='post("/api/resolve",
           {id:"${g.id}",resolution:${JSON.stringify(o)}})'>${esc(o)}</button>`).join("")}
+        ${g.options.length==0?`<button onclick='post("/api/resolve",
+          {id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."})'
+          >close - addressed</button>`:""}
         <input type="text" id="in-${g.id}" placeholder="or type an answer">
         <button onclick='post("/api/resolve",{id:"${g.id}",
           resolution:document.getElementById("in-${g.id}").value})'>send</button>
