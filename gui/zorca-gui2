@@ -40,7 +40,7 @@ PORT = 7778
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
-         "daily": [], "gitlog": []}
+         "daily": [], "gitlog": [], "stuck": []}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -212,7 +212,7 @@ def daily_events(n=12):
     return out[:n]
 
 
-def git_activity(cwds, n=12):
+def git_scan(cwds):
     """Last commit per live worktree - proof of work, not pane text.
 
     A pane's tail says what an agent is saying; a commit says what it landed.
@@ -232,9 +232,97 @@ def git_activity(cwds, n=12):
         except ValueError:
             continue
         rows.append(dict(ts=ts, repo=os.path.basename(cwd), sha=parts[1],
-                         text=parts[2], src="git -C " + cwd + " log -1"))
+                         text=parts[2], cwd=cwd,
+                         src="git -C " + cwd + " log -1"))
     rows.sort(key=lambda r: r["ts"], reverse=True)
-    return rows[:n]
+    return rows
+
+
+CLAIMS = os.environ.get("ZORCA_CLAIMS",
+                        os.path.expanduser("~/.zao/zorca-claims.json"))
+STALE_CLAIM_S = int(os.environ.get("ZORCA_STALE_CLAIM_S", "2700"))  # 45 min
+
+
+def claims_update(board, now=None):
+    """How long each pane has been claiming its current state.
+
+    orca-board reports state but not since-when, so this observes it: the
+    state per handle is written to disk every refresh and the timestamp only
+    moves when the state actually changes.
+
+    It CANNOT know how long a pane was in a state before zorca first saw it.
+    That gap is carried as `assumed`, not papered over - a pane first seen
+    already working reports "at least Nm", never a duration we did not
+    measure.
+    """
+    now = now or time.time()
+    try:
+        old = json.load(open(CLAIMS))
+    except Exception:
+        old = {}
+    if not board:
+        # A blank board is almost always a transient scrape failure, not
+        # fifteen panes closing at once. Overwriting on it would reset every
+        # accumulated duration to zero and the stale-claim surface would go
+        # quiet exactly when it had the most to say.
+        return old
+    new = {}
+    for p in board:
+        h = p.get("handle")
+        if not h:
+            continue
+        prev = old.get(h) or {}
+        if prev.get("state") == p.get("state"):
+            new[h] = prev
+        else:
+            new[h] = {"state": p.get("state"), "since": now,
+                      # first sight of this handle: the state may predate us
+                      "assumed": h not in old}
+    try:
+        tmp = CLAIMS + ".tmp"
+        os.makedirs(os.path.dirname(CLAIMS), exist_ok=True)
+        # Write through a temp file: a half-written claims file would reset
+        # every duration on the next read, which is worse than no file.
+        json.dump(new, open(tmp, "w"), indent=1)
+        os.replace(tmp, CLAIMS)
+    except Exception:
+        pass
+    return new
+
+
+def stuck_lanes(board, gitmap, claims, now=None):
+    """A lane claiming to work with nothing landed since the claim began.
+
+    Only rank 3-4 - a lane that is waiting on Zaal is not stuck, it is
+    blocked, and that is rail 1's job. A pane whose cwd is not a git repo is
+    skipped entirely: we cannot measure it, so we do not judge it.
+    """
+    now = now or time.time()
+    out = []
+    for p in board:
+        if p.get("rank") not in (3, 4):
+            continue
+        c = claims.get(p.get("handle")) or {}
+        since = c.get("since")
+        if not since:
+            continue
+        held = now - since
+        if held < STALE_CLAIM_S:
+            continue
+        last = gitmap.get(p.get("cwd") or "")
+        if not last:
+            continue
+        if last["ts"] > since:
+            continue
+        out.append(dict(repo=p.get("repo") or "?", handle=p.get("handle"),
+                        state=p.get("state"), held=int(held),
+                        assumed=bool(c.get("assumed")),
+                        last_ts=last["ts"], last_sha=last["sha"],
+                        last_text=last["text"], cwd=p.get("cwd"),
+                        src="orca-board state + git -C " + (p.get("cwd") or "?")
+                            + " log -1, tracked in " + CLAIMS))
+    out.sort(key=lambda r: -r["held"])
+    return out
 
 
 def watcher():
@@ -294,14 +382,17 @@ def refresh():
     pending = [g for g in gates if g.get("status") == "pending"]
     resolved = [g for g in gates if g.get("status") != "pending"]
     w_alive, w_ts = watcher()
-    gits = git_activity([p.get("cwd") for p in board])
+    gits = git_scan([p.get("cwd") for p in board])
+    gitmap = {g["cwd"]: g for g in gits}
+    claims = claims_update(board)
+    stuck = stuck_lanes(board, gitmap, claims)
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
-                     daily=daily, gitlog=gits,
+                     daily=daily, gitlog=gits[:12], stuck=stuck,
                      run=runs[0][:120] if runs else "")
 
 
@@ -485,6 +576,20 @@ input[type=text] { width:58%; cursor:text; }
 #wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
 #wallsummary .idle { color:var(--gold); }
 
+/* what is stuck - a lane claiming to work with nothing landed */
+#stuck { margin-top:26px; }
+#stuck h2 { color:var(--warn); }
+#stuck.clear h2 { color:var(--dim); }
+.jam { background:var(--panel); border:1px solid var(--line-interactive);
+       border-left:3px solid var(--warn); border-radius:var(--r);
+       padding:11px 14px; margin-bottom:9px; cursor:pointer; }
+.jam:hover { background:var(--panel-raised); }
+.jamline { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+.jamwhy { color:var(--warn); font-size:13px; }
+.jamlast { color:var(--dim); font-size:13px; margin-top:5px; }
+.jamsrc { display:block; font-size:10px; color:var(--dim); opacity:.75;
+          margin-top:5px; line-height:1.3; }
+
 /* rail 3 - reference, folded away */
 #ref { margin-top:30px; border-top:1px solid var(--line); padding-top:8px; }
 #ref summary { color:var(--dim); font-size:13px; cursor:pointer;
@@ -562,6 +667,11 @@ input[type=text] { width:58%; cursor:text; }
 <section id="wall">
  <h2>The wall <span class="stamp" id="wallsummary"></span></h2>
  <div id="panes"></div>
+</section>
+
+<section id="stuck">
+ <h2>Stuck <span class="stamp" id="stuckcount"></span></h2>
+ <div id="jams"></div>
 </section>
 
 <details id="ref">
@@ -754,6 +864,30 @@ function actRow(a){
   </div>`;
 }
 
+/* A lane claiming to work with nothing landed since the claim began.
+   "held" is measured by zorca watching the state change, so a pane first
+   seen already working reports "at least" - a duration we did not observe
+   is never reported as one we did. */
+function renderStuck(s){
+  const rows = s.stuck || [];
+  document.getElementById("stuckcount").textContent = rows.length === 0
+    ? "nothing stuck - every working lane has landed something since it started"
+    : rows.length + " claiming to work with nothing landed";
+  document.getElementById("stuck").classList.toggle("clear", rows.length === 0);
+  document.getElementById("jams").innerHTML = rows.map(r => `
+    <div class="jam" onclick='post("/api/focus",{handle:"${r.handle}"}, this)'>
+      <div class="jamline">
+        <span class="who">${esc(r.repo)}</span>
+        <span class="chip r${r.state === "working" ? 4 : 3}">${esc(r.state)}</span>
+        <span class="jamwhy">${r.assumed ? "at least " : ""}${ago(r.held)} with nothing landed</span>
+      </div>
+      <div class="jamlast">last commit ${ago(Date.now()/1000 - r.last_ts)} ago
+        &middot; ${esc(r.last_sha)} ${esc(r.last_text)}</div>
+      <span class="jamsrc">${esc(r.src)}${r.assumed
+        ? " - first seen already in this state, so the real duration may be longer" : ""}</span>
+    </div>`).join("");
+}
+
 /* The fleet, four numbers wide. A zero that should be zero renders dim; a
    number that means something is wrong renders warn or gold, so the strip
    is scannable without reading it. */
@@ -762,6 +896,7 @@ function strip(s){
   const n = r => P.filter(p => p.rank === r).length;
   const st = x => T.filter(t => t.status === x).length;
   const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
+  const stuck = (s.stuck || []).length;
   let wcls = "good", wtxt = "-";
   if (!s.watcher_alive) { wcls = "bad"; wtxt = "DOWN"; }
   else if (!s.watcher_ts) { wcls = "flag"; wtxt = "no log yet"; }
@@ -771,9 +906,13 @@ function strip(s){
     wcls = w > 300 ? "flag" : "good";
   }
   const cells = [
-    ["lanes", "orca-board --json", `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
+    ["lanes", stuck
+        ? "orca-board --json; stuck = git log -1 vs ~/.zao/zorca-claims.json"
+        : "orca-board --json",
+      `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
-      `<b class="nil">${n(6)}</b> free`],
+      `<b class="nil">${n(6)}</b> free` +
+      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "")],
     ["tasks", "orchestration.db (read-only)", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
       `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
@@ -879,6 +1018,7 @@ async function load(){
   document.getElementById("panes").innerHTML =
     live.map(p => paneRow(p, p.rank <= 2)).join("")
     || '<div class="card">no live panes</div>';
+  renderStuck(s);
   document.getElementById("coldpanes").innerHTML =
     s.panes.filter(p => p.rank >= 5).map(paneRow).join("")
     || '<span class="stamp">none</span>';
