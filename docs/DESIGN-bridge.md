@@ -26,7 +26,7 @@ rewriting:
 
 | Question | v1 said | Zaal's verdict | Consequence |
 |---|---|---|---|
-| Own bot or fold into ZOE? (v1's section 7; both branches now written up in **section 11**) | leaned own bot, front end on the Mac | **Extend ZOE in place.** `@zaoclaw_bot` keeps its identity, audience and VPS deploy; v2 lands as versions. | **v1's core recommendation is dead.** The front end is on the VPS from day one. The transport hop v1 deferred to stage 4 is now stage 1's hardest part. |
+| Own bot or fold into ZOE? (v1's section 7; both branches now written up in **section 11**) | leaned own bot, front end on the Mac | **Extend ZOE in place** - confirmed via orchestrator relay 2026-08-26, not Zaal-direct (q4). `@zaoclaw_bot` keeps its identity, audience and VPS deploy; v2 lands as versions. | **v1's core recommendation is dead.** The front end is on the VPS from day one. The transport hop v1 deferred to stage 4 is now stage 1's hardest part. |
 | `/lane` at all? | flagged it as spending money on a lock-screen tap | **Yes, and bigger than v1 imagined.** Not "resume a parked lane" - `/lane <request>` creates a new planned lane through the orchestrator. Highest-value feature. | It is stage 1, and it unblocks the rest. The money concern does not disappear; it becomes a confirm step and a TTL (section 3.3). |
 | Telegram or Discord first? | open | not picked; recommendation requested | Section 6. |
 
@@ -342,11 +342,15 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
 2. Poll interval: 10s assumed above, not decided.
 3. Does `/lane` pick the repo, or does ZOE ask when the request is ambiguous?
    Asking is safer; it also costs a round trip on a phone.
-4. **Is the fold-into-ZOE verdict firm?** Section 1 records it as Zaal's,
-   relayed by the coordinator; a later relay asked for both branches
-   documented and repeated that the unsent prompt-line text is not an answer.
-   Both branches are now written up in **section 11**, which also states why
-   this lane did not resolve the tension itself.
+4. ~~Is the fold-into-ZOE verdict firm?~~ **CLOSED 2026-08-26 -
+   CONFIRMED VIA ORCHESTRATOR RELAY.** Evidence chain: Zaal -> orchestrator
+   -> coordinator relay -> this lane; no pane-typed text from Zaal was seen
+   here, so this is a relay confirmation and is labelled as one.
+   **The decision is settled** and branch A stands (section 11 keeps branch B
+   written up as the closed alternative). A relay asked for this to be
+   recorded as ZAAL-DIRECT; it is deliberately not, because a relay saying it
+   matches his recorded verdict is still a relay, and upgrading the label
+   would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
 
@@ -364,10 +368,10 @@ by the unsent text - which read "fold it into ZOE, telegram first" and
 overlaps the verdict on exactly the ZOE half - then the question is open and
 section 1 is overstated.
 
-**This lane is not resolving that.** Section 1 stays as recorded, because
-un-deciding a relayed verdict on my own authority is the same error in the
-opposite direction. This section documents both branches so neither is lost,
-and Zaal owns the leap. Flagged in section 10.
+**Resolved 2026-08-26, and labelled precisely.** The verdict is confirmed
+**via orchestrator relay**, not as Zaal-direct - see open question 4 for the
+chain and for why the stronger label was declined. Branch A stands; branch B
+below is kept as the documented closed alternative, not a live option.
 
 (Pointer for stale references: this was **v1's section 7**. In v2 that number
 is the OpenMatter slot.)
@@ -481,8 +485,11 @@ weigh, not measurable from here.
 
 ## 12. v3 - the ratified bridge and the live build plan
 
-Zaal answered both open questions and ratified a transport. This section
-supersedes section 8 and settles sections 3 and 11.
+Both open questions are answered and a transport is ratified, **confirmed via
+orchestrator relay 2026-08-26** (chain: Zaal -> orchestrator -> coordinator
+relay -> this lane; not observed as Zaal's own typed text). The decision is
+settled at that evidence level - see open question 4. This section supersedes
+section 8 and settles sections 3 and 11.
 
 **What is now decided:**
 
