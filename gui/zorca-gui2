@@ -78,6 +78,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
          "orphan_total": 0, "unmatched_panes": None, "inflight_rows": None,
+         "archive": None,
          "estate": None, "drafts_age": None, "trend": [],
          "stuck_candidates": 0, "stuck_observed": 0,
          "task_counts": {}, "resolved_count": 0,
@@ -499,6 +500,70 @@ def inflight_orphans(board, now=None, n=8):
     if rows is None:
         return [], 0, None
     return _orphans_and_unmatched(board, rows, now, n)
+
+
+ARCHIVE_AFTER_D = int(os.environ.get("ZORCA_ARCHIVE_AFTER_D", "3"))
+
+
+def archive_proposal(orphans, now=None):
+    """A paste-ready rewrite of IN-FLIGHT.md that MARKS stale rows archived.
+
+    Nothing here edits the file. It emits the whole table with the stale
+    rows annotated in place, so applying it is one replace rather than
+    twenty, and so nothing is deleted - an archived row still says what the
+    lane was doing and when it claimed it.
+
+    Three days because a row at zero or two days is very likely a lane
+    between reboots, while three days of no live pane, across a period when
+    twenty other lanes ran, is a row describing work that stopped.
+    """
+    now = now or time.time()
+    rows = inflight_rows()
+    if rows is None:
+        return {"state": "unreadable"}
+    stale = {o["lane"]: o for o in orphans
+             if o.get("age_days") is not None and o["age_days"] >= ARCHIVE_AFTER_D}
+    try:
+        raw = open(INFLIGHT).read().splitlines()
+        mtime = time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(os.path.getmtime(INFLIGHT)))
+    except Exception as e:
+        problem("IN-FLIGHT.md", e)
+        return {"state": "unreadable"}
+    today = time.strftime("%Y-%m-%d")
+    out, marked, lanes_hit = [], 0, set()
+    for ln in raw:
+        if not ln.startswith("|"):
+            out.append(ln)
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 4 or cells[0].lower() == "lane" or set(cells[0]) <= set("- "):
+            out.append(ln)
+            continue
+        o = stale.get(cells[0])
+        # Only the newest row for a lane is judged; older duplicates of the
+        # same lane are left exactly as they are rather than swept along.
+        if o and cells[3] == o["when"] and not cells[1].startswith("ARCHIVED "):
+            cells[1] = "ARCHIVED %s (no live lane for %dd): %s" % (
+                today, o["age_days"], cells[1])
+            marked += 1
+            lanes_hit.add(cells[0])
+            out.append("| " + " | ".join(cells) + " |")
+        else:
+            out.append(ln)
+    header = [
+        "<!-- proposed by zorca %s - REPLACE the table with this block." % today,
+        "     Generated from IN-FLIGHT.md as it stood at %s (%d lines)." % (mtime, len(raw)),
+        "     If the file has changed since, reload the board and take a fresh copy.",
+        "     %d rows across %d lanes marked ARCHIVED - no live pane matched" % (marked, len(lanes_hit)),
+        "     those lanes for %d days or more. A lane with several rows on its" % ARCHIVE_AFTER_D,
+        "     newest date has all of them marked; older rows are left alone.",
+        "     Nothing is deleted - each archived row keeps its lane, its text and its date.",
+        "     zorca does not write this file. Paste it yourself or do not. -->",
+    ]
+    return {"state": "ok", "marked": marked, "lanes": len(lanes_hit), "mtime": mtime,
+            "threshold_days": ARCHIVE_AFTER_D,
+            "text": "\n".join(header + out)}
 
 
 def inflight_rows():
@@ -1069,8 +1134,10 @@ def refresh():
         p["held"] = int(_now - c["since"]) if c.get("since") else None
         p["held_assumed"] = bool(c.get("assumed"))
     with st.time("orphans"):
-        orphans, orphan_total, unmatched_panes = inflight_orphans(board)
+        orphans, orphan_total, unmatched_panes = inflight_orphans(board, n=999)
         iflrows = inflight_rows()
+        archive = archive_proposal(orphans)
+        orphans = orphans[:8]
     with st.time("estate"):
         estate = estate_sweep([p.get("cwd") for p in board])
     with st.time("drafts"):
@@ -1100,7 +1167,7 @@ def refresh():
                      daily=daily, gitlog=gits[:12], stuck=stuck,
                      stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
                      orphans=orphans, orphan_total=orphan_total,
-                     unmatched_panes=unmatched_panes,
+                     unmatched_panes=unmatched_panes, archive=archive,
                      inflight_rows=(len(iflrows) if iflrows is not None else None),
                      estate=estate,
                      drafts_age=dage, grill=grill, trend=trend, acks=acks_read(),
@@ -1355,6 +1422,10 @@ input[type=text] { width:58%; cursor:text; }
 .worked .good { color:var(--ok); }
 .worked .flag { color:var(--gold); }
 .worked .purpose { color:var(--text); }
+#archive pre { white-space:pre; overflow:auto; max-height:340px; font-size:11px;
+               background:var(--navy); border:1px solid var(--line);
+               border-radius:6px; padding:10px; margin-top:8px; }
+#archive summary { cursor:pointer; color:var(--gold); padding:4px 0; }
 .worked { white-space:normal; }
 #wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
 #wallsummary .idle { color:var(--gold); }
@@ -1501,6 +1572,8 @@ button.mini.ack:hover { color:var(--gold); }
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
    <h2>Lanes running undeclared</h2><div class="card" id="undeclared"></div>
+   <h2>Stale IN-FLIGHT rows</h2>
+   <div class="card" id="archive"></div>
    <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
    <h2>Failing quietly</h2>
    <div class="card jamsrc" id="problems" style="opacity:1"></div>
@@ -2296,6 +2369,7 @@ function unmeasured(){
   say("refreshcost", "no refresh has completed yet");
   say("problems", "not measured yet");
   say("undeclared", "not measured yet");
+  say("archive", "not measured yet");
   document.getElementById("needbtn").classList.remove("clear");
   document.getElementById("needsyou").classList.remove("clear");
   document.getElementById("stuck").classList.remove("clear");
@@ -2429,6 +2503,31 @@ function render(s){
          `these, so nothing outside their own pane says what they are for. ` +
          `Writing the rows is a human's call - this surface only reports.</div>`
        : '<span class="stamp">every live lane has an IN-FLIGHT row</span>');
+  // Paste-ready, never applied. zorca does not write IN-FLIGHT.md, and the
+  // block says so in its own header. It is behind a disclosure because it
+  // is the whole table - roughly 75 KB - and nobody needs that in the DOM
+  // until they are actually going to paste it.
+  const arch = s.archive;
+  const archEl = document.getElementById("archive");
+  if (!arch) {
+    archEl.innerHTML = '<span class="stamp">open this fold to load the proposal</span>';
+  } else if (arch.state !== "ok") {
+    archEl.innerHTML = '<span class="stamp">IN-FLIGHT.md could not be read, ' +
+      'so nothing can be proposed</span>';
+  } else if (!arch.marked) {
+    archEl.innerHTML = '<span class="stamp">no row is stale by ' +
+      arch.threshold_days + ' days or more - nothing to archive</span>';
+  } else {
+    archEl.innerHTML =
+      `<b class="flag">${arch.marked}</b> rows across <b>${arch.lanes}</b> lanes ` +
+      `have had no live pane for ${arch.threshold_days} days or more.` +
+      `<div class="stamp" style="margin:6px 0">Marked, not deleted - each row ` +
+      `keeps its lane, its text and its date. Generated from the file as it ` +
+      `stood at ${esc(arch.mtime)}; if it has changed since, reload and take a ` +
+      `fresh copy. zorca does not write this file.</div>` +
+      `<details><summary>show the paste-ready table (${Math.round(arch.text.length/1024)} KB)</summary>` +
+      `<pre>${esc(arch.text)}</pre></details>`;
+  }
   const e = s.estate;
   document.getElementById("aheadlist").innerHTML = !e
     ? '<span class="stamp">no worktree could be read this refresh</span>'
@@ -2583,7 +2682,8 @@ async function loadDetail(force){
     '<span class="stamp">loading...</span>';
   try {
     const d = await (await fetch("/api/state?detail=1")).json();
-    DETAIL = {tasks: d.tasks || [], resolved: d.resolved || []};
+    DETAIL = {tasks: d.tasks || [], resolved: d.resolved || [], archive: d.archive || null};
+    if (LAST) { LAST.archive = DETAIL.archive; render(LAST); return; }
   } catch (e) {
     document.getElementById("tasks").innerHTML =
       '<span class="stamp">could not load the detail - ' + esc(e.message) + '</span>';
@@ -2820,7 +2920,7 @@ class H(BaseHTTPRequestHandler):
                     body = json.dumps(CACHE)
                 else:
                     lean = {k: v for k, v in CACHE.items()
-                            if k not in ("tasks", "resolved")}
+                            if k not in ("tasks", "resolved", "archive")}
                     body = json.dumps(lean)
             self._send(200, body)
         else:
