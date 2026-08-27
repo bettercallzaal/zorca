@@ -353,6 +353,11 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
+7. **OPEN, FOR ZAAL ONLY - is the section 12.4 partner-terms field publicly
+   derivable?** This lane cannot decide it; the test is his. Full workup in
+   **section 14**, under the disclosure flag: the exact field, the sources a
+   stranger would need, and this lane's own read stated separately from the
+   measurement.
 6. ~~One instruction is unread.~~ **CLOSED 2026-08-26.** A mid-turn message
    arrived head-truncated, surviving only as *"e delete call stay Zaal's - do
    not touch either."* The head was **not** reconstructed and nothing was
@@ -779,9 +784,51 @@ That makes it a disclosure rather than a convenience republication.
 forward-only and history retains it; and deletion or redaction on a public
 repo is Zaal's call, never an agent's - the same rule that governed the two
 PII findings earlier today. Raising it is the whole of this lane's role.
-Per the corollary learned the same day, the figures are **not restated** in
-this flag or in any commit message, because describing precisely what would
-be removed republishes it.
+
+#### The exact field
+
+**Section 12.4, point 2** - the two linked commercial quantities in that
+paragraph: the vendor's **per-hour credit rate** for the metered runtime, and
+the **credit balance** on ZAO's account with them. They are load-bearing
+there because together they yield the runway figure that argues against
+cutover before the billing model is measured.
+
+The **values are deliberately not copied into this section.** Not squeamish-
+ness - an operational reason: they already sit in 12.4, so repeating them
+here adds no disclosure today, but if Zaal redacts 12.4 a duplicate in
+section 14 would survive and silently defeat the redaction. A pointer
+survives a redaction correctly; a copy does not.
+
+#### What a stranger would need to derive them
+
+| Source | Status |
+|---|---|
+| The vendor's public pricing page | **Does not resolve** - recorded in the estate's own research on this vendor; not re-measured by this lane. |
+| Their docs subdomain | **Does not resolve** - same source, same caveat. |
+| A published rate card, partner agreement, or press figure | None found in that research. |
+| The account balance | Visible only inside the vendor's authenticated dashboard, scoped to ZAO's org. |
+| The spoken rate | From a private call transcript held off-repo. |
+| Comparable-vendor inference | Would yield an order-of-magnitude estimate, not these figures - and an estimate that happened to land close would still not be *these* numbers sourced from *this* account. |
+
+#### This lane's read, stated separately from the measurement
+
+**Measured:** every public route above is absent or unresolvable, per the
+estate's own prior research on this vendor.
+
+**Inference, mine, and Zaal owns the leap:** **not derivable.** A stranger
+with only public sources cannot reach either quantity, and the pairing of a
+specific rate with a specific balance is the kind of linkage that exists only
+because ZAO holds an account. On the standing test - *could a stranger derive
+this from public sources alone?* - my read is no, so it gates.
+
+**Counter-argument, so the decision is not one-sided:** the rate is derived
+rather than quoted, the balance is small and time-bounded, and a vendor's
+approximate hourly price is the sort of fact that tends to become public the
+moment they publish a pricing page. If Zaal reads it as commercially
+uninteresting, the cost of leaving it is close to zero. That is his call to
+make, not this lane's to pre-empt.
+
+Tracked as **open question 7** in section 10.
 
 ### Untouched, on instruction - do not assume otherwise
 
