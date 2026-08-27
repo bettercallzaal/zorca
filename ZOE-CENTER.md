@@ -141,7 +141,7 @@ Two rules keep this honest:
 | **Meetings, Phase 3.5** | **Built and battle-scarred.** Classifies lanes, sends packets, bounded 10-minute wait, then fans out. Refuses bare shells and panes on pickers; ranks by pane title; clears its own trust gate. | Its weigh-in request becomes an **ask-queue record**, so a lane's silence is visible on the phone instead of only in a directory. Phase 3.5 is the reference implementation of the whole pattern - do not redesign it, generalise it. |
 | **Grill** | `AskUserQuestion`, Mac-terminal only. | Becomes ask-queue records rendered as inline keyboards. This is the single biggest reachability win and it needs no new concepts. |
 | **ZOL** | Live daemon on the Pi. Farcaster identity with its own signer. Posts human-gated, **no spend capability by design**. Already described as *a child of ZOE* - the hierarchy exists on paper and not in code. | Outbound already works. What is missing is **inbound**: replies and mentions do not reach the orchestrator, so ZOL is a mouth without an ear. Route mentions in as ask-queue records ("reply to this?"), never as auto-posts. |
-| **Chat export** | **Landed 2026-08-27**: `~/.zao/telegram-exports/zoe/result.json`, 7.0 MB, 10,142 messages. A separate ZOE-analysis lane in this repo is mining it. | Already producing section 0. The ingest slot below points at that path. |
+| **Chat export** | **Landed 2026-08-27**: `~/.zao/telegram-exports/zoe/result.json` - five months of ZOE chat history. A separate ZOE-analysis lane in this repo is mining it and owns the figures. | Already reshaping the design (section 0). The ingest slot below points at that path. |
 | **Discord** | Not built. | A second adapter behind the same command layer. Deliberately last - see section 8. |
 
 ## 6. Telecast is the shape
@@ -175,7 +175,7 @@ ask ZOE for?* Every command surface above is a guess about that until the
 export is read.
 
 **The file.** `~/.zao/telegram-exports/zoe/result.json` - 7.0 MB, single-chat
-export shape, 10,142 messages. **It stays there.** It is private data about
+export shape, five months of history. **It stays there.** It is private data about
 other people as well as Zaal; it does not enter this repo or any repo, and the
 ingester reads it in place.
 
@@ -290,13 +290,13 @@ is made twice and the second one drifts.
    ZOE asks, Zaal taps. A "ZOE may resolve questions below confidence X"
    rule would change the character of the system and is not proposed here.
 3. **Merge or vendor the export ingester?**
-4. **Are the export aggregates publishable at all?** This repo is public,
-   and they are behavioural data derived from a private chat that a stranger
-   could not derive. Moving them out of this document does **not** settle it -
-   they now live in `zoe-analysis-2026-08-27.md` in the same public repo. Same
-   shape as open question 7 in `docs/DESIGN-bridge.md`, same answer: **Zaal's
-   call.** Raised once here rather than twice; that doc's lane owns the
-   content, so any redaction is theirs to apply and his to decide.
+4. ~~Are the export aggregates publishable?~~ **CLOSED 2026-08-27:**
+   aggregate ZOE message counts are **not** derivable by a stranger from
+   public sources, so they gate, and the **qualitative form is the default
+   for this public repo whichever file they sit in.** Applied here - this
+   document now describes the corpus by span rather than by count. The
+   figures themselves are the analysis lane's to hold and redact; that is
+   theirs, not this lane's to re-raise.
 5. Open question 7 in `docs/DESIGN-bridge.md` is unrelated and still open.
 
 Related: `docs/DESIGN-bridge.md`, `PLAYBOOK.md`, `README.md`

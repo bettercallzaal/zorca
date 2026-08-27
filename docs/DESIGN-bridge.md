@@ -353,11 +353,18 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
-7. **OPEN, FOR ZAAL ONLY - is the section 12.4 partner-terms field publicly
-   derivable?** This lane cannot decide it; the test is his. Full workup in
-   **section 14**, under the disclosure flag: the exact field, the sources a
-   stranger would need, and this lane's own read stated separately from the
-   measurement.
+7. ~~Is the section 12.4 partner-terms field publicly derivable?~~
+   **CLOSED 2026-08-27: not derivable, therefore gated.** Ruled by Zaal via
+   the orchestrator. **Option 2 applied** - redacted forward in 12.4, both
+   figures replaced by a qualitative statement, argument intact. No history
+   rewrite, per the recommendation in s14: this branch is shared and the
+   values are already out. The workup that produced the options stays in s14
+   as the record.
+
+   **Standing rule from the same ruling:** aggregate figures a stranger
+   cannot derive from public sources gate, **whichever file they sit in** -
+   so the qualitative form is the default for this public repo, not a
+   one-off fix.
 6. ~~One instruction is unread.~~ **CLOSED 2026-08-26.** A mid-turn message
    arrived head-truncated, surviving only as *"e delete call stay Zaal's - do
    not touch either."* The head was **not** reconstructed and nothing was
@@ -638,11 +645,17 @@ preference.**
    idempotent operation with a manual override, or the fallback is a comfort
    rather than a mechanism.
 2. **A webhook does not reduce metered cost if billing is by container
-   uptime.** The container must be running to receive an update. On the only
-   rate datum that exists - derived ~0.837 Cr/hr against a ~12 Cr balance -
-   a permanently-up instance is under a day of runway. Before cutover,
-   measure whether OpenMatter bills uptime or invocation. If uptime, this
-   stage needs a topped-up grant or an explicit budget, not an assumption.
+   uptime.** The container must be running to receive an update. The runtime
+   is metered per compute-hour, and the balance on the account is small
+   relative to continuous uptime - so a permanently-up instance drains it
+   quickly. Before cutover, measure whether OpenMatter bills uptime or
+   invocation. If uptime, this stage needs a topped-up grant or an explicit
+   budget, not an assumption.
+
+   *(Redacted forward 2026-08-27, open question 7 resolved: the rate and the
+   balance were a partner's non-public commercial terms. The argument never
+   rested on either value, only on their ratio, so the conclusion is
+   unchanged. History retains the figures; no rewrite - see s14.)*
 3. **The grant's purpose.** The credits were a partner grant for an agreed
    newsletter-agent beta. Running ZOE's lane control on them is a different
    use. Zaal's call, but it should be made deliberately rather than
