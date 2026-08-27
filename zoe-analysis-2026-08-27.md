@@ -89,6 +89,35 @@ message this way; the other 100 he opened cold.
 | self-throttle notice | 2 | 0.0% | 0 | 0 | 0 | 2 | 0 | 0 | 50.00% |
 | **TOTAL** | **9,627** | 100% | 168 | 690 | 897 | 890 | 2,273 | 4,709 | **4.21%** |
 
+## What this attribution can and cannot say
+
+**Every reply rate in this document, and in any document that cites it, is a
+ceiling. It is not a measurement that a message worked.**
+
+A rate is computed by crediting the **last** ZOE message before a Zaal reply.
+But ZOE rarely sends one message. The 405 attributed replies arrived after
+**2,064 ZOE messages** standing in their 30-minute windows - mean 5.1 per
+reply, median 3, maximum 28. Only one message in each window can have been
+the one that worked, so **1,659 messages (80.4%) sat inside a window that
+produced a reply and cannot be shown to have earned any of it.** One reply
+marks a whole burst answered.
+
+Re-running every figure with the opposite rule - split each reply's credit
+evenly across all messages in its window - moves the bands and does not move
+the conclusion:
+
+| Band | ceiling (last-message) | floor (split-credit) |
+|---|--:|--:|
+| ANSWER | 17.64% | 16.45% |
+| ASK | 0.58% | 0.89% |
+| BROADCAST | 1.97% | 2.18% |
+
+Note the direction: split-credit *raises* ASK and BROADCAST, because credit
+bleeds onto the bursty classes that happened to be nearby. Neither method is
+the truth. The defensible claim is the ordering and its magnitude - **ANSWER
+outperforms ASK by 20-30x under either rule** - and per-type rates should be
+read as upper bounds, most inflated for the classes that arrive in bursts.
+
 ## The one line the table is saying
 
 Every type divides into three bands: ZOE **answering** him, ZOE **asking**
@@ -144,6 +173,46 @@ under 4,567 other messages.** More than half of everything it has ever sent
 - **ZOE noticed once.** In June it sent: *"I've sent 3 things you haven't
   replied to. I'll dial back - raising my bar so I only ping when it really
   matters."* Two such messages exist in 151 days. Traffic tripled afterwards.
+
+## The classes that work, over the full window
+
+The August-only view invites a wrong conclusion: that the fix is composition,
+shift the mix back toward answers and the replies return. The full Mar-Aug
+record says otherwise. **The classes that work did not merely shrink - their
+reply rates collapsed too, while they were still being sent.**
+
+| Class | Mar | Apr | May | Jun | Jul | Aug |
+|---|--:|--:|--:|--:|--:|--:|
+| conversational answer | **56.3%** (67/119) | 39.4% (104/264) | 22.7% (51/225) | 6.1% (16/262) | 7.5% (17/226) | **1.6%** (2/124) |
+| work report | **70.4%** (19/27) | 25.0% (3/12) | 9.2% (7/76) | 25.0% (4/16) | 0% (0/18) | 0% (0/2) |
+| failure report | 50.0% (5/10) | 52.2% (12/23) | - | 0% (0/3) | 1.0% (1/96) | 2.7% (2/73) |
+| **ANSWER band** | **59.1%** (91/154) | 39.2% (112/286) | 17.8% (61/343) | 5.4% (25/461) | 6.5% (28/428) | **2.1%** (3/142) |
+
+ZOE still sent 124 conversational answers in August. Two were answered. In
+March the same class ran at 56.3%.
+
+| Month | replies earned | messages sent |
+|---|--:|--:|
+| Mar | 100 | 168 |
+| Apr | 135 | 690 |
+| May | 73 | 897 |
+| Jun | 39 | 890 |
+| Jul | 47 | 2,273 |
+| Aug | **11** | **4,709** |
+
+**Replies earned fell from 100 to 11 while messages sent rose from 168 to
+4,709 - a 28x rise in output bought a 9x fall in return.** Volume did not
+just crowd out the good classes; it poisoned them. A v2 that only rebalances
+the mix, without cutting absolute volume, is building the March message set
+inside the August channel and should expect the August rate.
+
+**On gates:** a parallel lane reports roughly 19 gates over five months at
+about 47% answered. That does not appear in this record and this document
+does not carry it. The nearest thing here is `Decision needed` - **194
+messages, Jul-Aug only, 3.6% answered**. Orchestration gates live in the
+orchestration DB, a surface Zaal cannot reach from his phone (that is
+`ZOE-CENTER.md` section 3's own point). Their answer rate is evidence about
+that surface, not about this one, and the two must not be averaged.
 
 ## What he asked for, in his own words
 
@@ -224,7 +293,8 @@ open ask at a time, and the next card does not send until the current one is
 resolved or expires. If a queue has 573 items, that is a dashboard, and the
 chat gets one line: how many, and the single most important one.
 
-**3. Answer, do not report - this is the mechanism behind rank 1.**
+**3. Answer, do not report - and cut volume anyway, because answers stop
+working too.**
 Answering draws a reply **17.64%** of the time; asking for a tap draws
 **0.58%** - a 30x gap. ZOE's answering share fell from **91.7% to 3.0%**
 while its absolute answering volume held flat (154 messages in March, 142 in
@@ -234,7 +304,11 @@ grows. Status is pulled (he types "status" - one of his top terms), never
 pushed. The 1,116 messages across watchdog restarts, recurring status
 reports, build-candidate approvals, cost reports, bot activity logs,
 agent-bus relays, event promos and affirmation prose drew **zero replies in
-151 days** and should not exist in the chat at all.
+151 days** and should not exist in the chat at all. But rebalancing alone
+will not work: the ANSWER band itself fell from **59.1% to 2.1%** answered
+across the same window. At August volume Zaal ignores answers too, so the
+budget in rank 1 is not optional trim around this fix - it is the
+precondition for it.
 
 **4. Every ask carries an owner, a deadline and an expiry.**
 The ask band is **51.6% of everything ZOE has ever sent and lands 0.58% of
