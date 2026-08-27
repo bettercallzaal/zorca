@@ -7,85 +7,50 @@
 paths, keys or account identifiers appear below - components are named by
 role.
 
-## 0. The constraint that shapes everything, measured
+## 0. The constraint that shapes everything
 
-The ZOE chat export landed. **This section is the first constraint, and it
-falsifies part of what follows.** Every number was re-measured from the export
-by this lane, not taken on report.
+**Evidence lives in [`zoe-analysis-2026-08-27.md`](zoe-analysis-2026-08-27.md).
+One writer per fact: that lane owns the numbers, the categories and the
+quotes. This document cites them and carries design only.**
 
-10,142 messages, 2026-03-28 to 2026-08-27, 151 distinct days. 9,627 from ZOE,
-515 from Zaal.
+An earlier revision of this section carried my own measurements of the export.
+They are **withdrawn** in favour of that doc, which decomposes the traffic far
+further than mine did - my classifier dropped 89.5% of messages into an
+undifferentiated bucket, and theirs opens it.
 
-| Month | Zaal | ZOE | ratio |
-|---|---|---|---|
-| Mar | 123 | 168 | 1:1 |
-| Apr | **184** | 690 | 4:1 |
-| May | 83 | 897 | 11:1 |
-| Jun | 53 | 890 | 17:1 |
-| Jul | 60 | 2,273 | 38:1 |
-| Aug | **12** | 4,709 | **392:1** |
+**One of my withdrawn conclusions was wrong, not merely coarser**, and it is
+worth naming rather than quietly deleting: I measured failure notices at a low
+reply rate and concluded they were noise Zaal ignores. The analysis lane
+measures the opposite - **breakage is the one thing he reliably answers**,
+at many times the rate of a decision card. My number was a substring artifact
+over a different window. **Any design that suppresses failure reporting to cut
+volume would have been built on my error.** Cut the feed, not the alarms.
 
-**ZOE did not lose him by being wrong. It lost him by volume.** His replies
-fell 93% while its output rose 28x. Peak engagement was April, when the ratio
-was 4:1.
+### What this constrains, in design terms
 
-Two more measurements, both mine:
+Taking that doc's findings as given, four things follow for this design. Three
+of them contradict what I proposed in the first draft.
 
-- **86% of what ZOE says is never answered.** 13.9% of its messages have any
-  Zaal message within two hours; 8.6% within thirty minutes. And that
-  overstates it - ZOE sends in bursts, so a single reply marks every message
-  in the burst as "answered". True engagement is lower than 8.6%.
-- **He does not use commands.** Only **5%** of his 515 messages start with a
-  slash. Median length 45 characters, p90 307. He writes prose, and he asks
-  for work and status: *research, build, next, status, check, test, docs,
-  tasks, error*.
+1. **The command-surface framing is wrong.** Sections 5 and 9 assumed verbs
+   like `/lane` and `/board`. He overwhelmingly writes prose, not commands.
+   **Natural language is the front door; commands are the accelerator.**
+2. **An ask queue that ADDS messages fails by arithmetic.** His replies are
+   the scarce resource and the budget is tiny. The queue must **displace**
+   output, not add to it.
+3. **Grill cards are the specific thing not to ship into this channel.**
+   Build step 2 proposed exactly that. The analysis lane measures enumerated
+   decision cards as both the largest class of ZOE's traffic and its
+   worst-answered - a queue enumerated into a chat window. That is a direct
+   refutation of my own step, on far better evidence than the eight cards my
+   pass saw.
+4. **Bounded questions still work - they are drowning, not failing.** Gates
+   and completions answer far above baseline. The ask-queue idea survives; the
+   volume it would arrive in does not.
 
-### The part that is actually good news
-
-Reply rate by message class is not flat. It varies by 7x:
-
-| ZOE message class | count | answered <=2h |
-|---|---|---|
-| `complete` | 57 | **50.9%** |
-| `gate` | 19 | **47.4%** |
-| `commit` | 18 | 27.8% |
-| `status` | 74 | 25.7% |
-| `merged` | 41 | 24.4% |
-| `pr` | 146 | 18.5% |
-| `failed` | 183 | **6.6%** |
-| `card` | 8 | **0.0%** |
-| everything else | 8,616 | 13.3% |
-
-**Bounded questions work.** Gates are answered at 47%, three and a half times
-baseline - but ZOE sent nineteen of them in five months while sending 8,616
-undifferentiated messages. The asks are not failing. They are drowning.
-
-Meanwhile 183 failure notices earned a 6.6% reply rate. ZOE spends ten times
-more messages telling him things broke than asking him things he answers.
-
-### What this falsifies in this document
-
-Stated plainly, because two of these were mine:
-
-1. **The command-surface framing is wrong.** Sections 5 and 9 assume verbs
-   like `/lane` and `/board`. He uses slash commands 5% of the time. **Natural
-   language must be the front door and commands the accelerator**, not the
-   reverse.
-2. **An ask queue that ADDS messages makes this worse.** Its revealed budget
-   is his input rate - **12 messages in August**. A design needing more taps
-   than that fails by arithmetic. The ask queue must **displace** output, not
-   add to it.
-3. **Grill cards scored 0 of 8.** Build step 2 proposed moving the grill onto
-   this channel. On this evidence it would have landed in the one class with a
-   zero reply rate. Small n, so it is a warning rather than a verdict - but it
-   is a warning against exactly what I proposed.
-
-### The corrected goal
-
-**v2 sends less and answers more.** Not "ZOE reaches more surfaces" - ZOE
-already reaches him 174 times a day and is ignored 86% of the time. Centering
-everything on that channel without cutting its volume routes the whole estate
-into a firehose he has already learned to skip.
+**The corrected goal: v2 sends less and answers more.** Not "ZOE reaches more
+surfaces" - it already reaches him constantly and is mostly skipped.
+Centering the estate on that channel without cutting its volume routes
+everything into a firehose he has learned to ignore.
 
 ## 1. What changes
 
@@ -275,10 +240,11 @@ data: it belongs off-repo, like the other private transcripts already are.
 Ordered so each step is useful alone and unblocks the next.
 
 **0. Cut ZOE's output first.** Nothing else in this list survives contact
-with a 392:1 channel. The export names the targets: 183 `failed` notices at a
-6.6% reply rate, and 8,616 undifferentiated messages at 13.3%. Set a daily
-budget, batch the rest into one digest, and drop any class that measures near
-zero. This is measurable before and after, from the same export.
+with the ratio the analysis doc measures. That doc's traffic table names the
+targets and ranks them; use it rather than guessing. Set a daily budget, batch
+the rest into one digest, drop the classes that measure near zero - **and
+leave failure reporting alone**, because it is the class he actually answers.
+Measurable before and after, from the same export.
 
 **1. The ask queue - as a REPLACEMENT for volume, not an addition.** One
 record type: question, options, owner, deadline,
@@ -287,12 +253,12 @@ source. Migrate **orchestration gates first** - they already carry an
 `options` array the GUI parses, so they are the cheapest real proof. This
 is first because it is what makes every later step answerable from a phone.
 
-**2. Grill onto the queue - but measure it, do not assume it.** Deleting the
-`AskUserQuestion` dependency is still right: today the grill needs a human at
-the Mac. But grill cards in this channel measured **0 replies out of 8**, so
-shipping them into the same firehose repeats the failure. Send a small batch,
-measure the reply rate against the 47% that gates achieve, and only then
-migrate the rest.
+**2. Grill off `AskUserQuestion` - but NOT into the chat feed.** Removing that
+dependency is still right: today the grill needs a human at the Mac. But the
+analysis doc shows enumerated decision cards are the single worst-performing
+thing ZOE has ever done, so the destination is a **surface he opens**, not a
+message stream he scrolls past. Send a small batch, measure against the rate
+gates achieve, and migrate only if it clears.
 
 **3. `/lane` end to end.** The Mac half exists and is tested; add ZOE's
 command, the confirm tap, and the result report. Per `docs/DESIGN-bridge.md`
@@ -324,14 +290,13 @@ is made twice and the second one drifts.
    ZOE asks, Zaal taps. A "ZOE may resolve questions below confidence X"
    rule would change the character of the system and is not proposed here.
 3. **Merge or vendor the export ingester?**
-4. **Are section 0's aggregates publishable?** This repo is public. Those
-   numbers are message counts and reply rates derived from a private chat
-   export - no content, no third-party names, but they are behavioural data
-   about Zaal, and a stranger cannot derive them. Same shape as open question
-   7 in `docs/DESIGN-bridge.md`, and the same answer applies: **his call, not
-   this lane's.** They are load-bearing - the design is unreadable without
-   them - so they are written in rather than omitted, and flagged here rather
-   than assumed acceptable. Redaction is forward-only and his.
+4. **Are the export aggregates publishable at all?** This repo is public,
+   and they are behavioural data derived from a private chat that a stranger
+   could not derive. Moving them out of this document does **not** settle it -
+   they now live in `zoe-analysis-2026-08-27.md` in the same public repo. Same
+   shape as open question 7 in `docs/DESIGN-bridge.md`, same answer: **Zaal's
+   call.** Raised once here rather than twice; that doc's lane owns the
+   content, so any redaction is theirs to apply and his to decide.
 5. Open question 7 in `docs/DESIGN-bridge.md` is unrelated and still open.
 
 Related: `docs/DESIGN-bridge.md`, `PLAYBOOK.md`, `README.md`
