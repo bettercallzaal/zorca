@@ -633,7 +633,6 @@ def estate_sweep(cwds):
                 noremote=noremote, unmeasured=unmeasured, full_swept=swept,
                 note=ESTATE_NOTE, ahead=ahead_rows[:10],
                 oldest_unlanded=(min(dated) if dated else 0),
-                oldest_unlanded_repo=(ahead_rows[0]["repo"] if dated else ""),
                 age_unmeasurable=age_unmeasurable,
                 ahead_total=sum(r["n"] for r in ahead_rows),
                 ahead_repos=len(ahead_rows),
@@ -679,9 +678,8 @@ def drafts_age(now=None):
 
 TREND = os.environ.get("ZORCA_TREND",
                        os.path.expanduser("~/.zao/zorca-trend.json"))
-TREND_KEEP = 4320          # 24h at one sample per 20s refresh
-TREND_BUCKET = 600         # serve at most one sample per 10 minutes
-TREND_POINTS = 150         # ~25h of buckets
+TREND_BUCKET = 600         # one sample per 10 minutes
+TREND_POINTS = 150         # ~25h of buckets, which is what is kept AND served
 
 
 def trend_record(values, now=None):
@@ -702,21 +700,20 @@ def trend_record(values, now=None):
             raise ValueError("trend file is not a list")
     except Exception:
         hist = []
+    hist = [h for h in hist if isinstance(h, dict) and h.get("ts")]
     if any(v is not None for v in values.values()):
-        hist.append(dict(ts=now, v=values))
-    else:
-        # Nothing was measurable this refresh. Recording an all-null sample
-        # would only add a point that can never serve as a baseline.
-        pass
-    hist = [h for h in hist if isinstance(h, dict) and h.get("ts")][-TREND_KEEP:]
-    try:
-        tmp = TREND + ".tmp"
-        os.makedirs(os.path.dirname(TREND), exist_ok=True)
-        json.dump(hist, open(tmp, "w"))
-        os.replace(tmp, TREND)
-    except Exception:
-        pass
-    # Decimate newest-first: keep the newest sample in each 10-minute bucket.
+        hist.append(dict(ts=int(now), v=values))
+    # Store what is served, not raw samples that are thrown away.
+    #
+    # This used to keep 24h at one sample per 20s - 4320 rows, 835 KB - and
+    # rewrite the whole file every refresh, which is 3.6 GB of disk writes a
+    # day for a dashboard. Every one of those rows was then decimated to
+    # one per 10 minutes before serving, so 97% of that was written and
+    # discarded. Keeping the decimated series loses nothing: the served
+    # resolution has always been ten minutes.
+    #
+    # The newest sample in each bucket wins, so the current bucket updates
+    # in place as the refresh loop runs.
     out, seen = [], set()
     for h in reversed(hist):
         b = int(h["ts"] // TREND_BUCKET)
@@ -727,6 +724,13 @@ def trend_record(values, now=None):
         if len(out) >= TREND_POINTS:
             break
     out.reverse()
+    try:
+        tmp = TREND + ".tmp"
+        os.makedirs(os.path.dirname(TREND), exist_ok=True)
+        json.dump(out, open(tmp, "w"))
+        os.replace(tmp, TREND)
+    except Exception:
+        pass
     return out
 
 
@@ -1910,7 +1914,15 @@ function freshness(s){
   let cls = "fresh", txt = "live";
   if (age >= 45) { cls = "aging"; txt = "as of " + at; }
   if (age > 90) { cls = "stale"; txt = "STALE " + ago(age) + " - refresher may be dead"; }
-  if (s.err) { cls = "stale"; txt = "STALE - " + s.err; }
+  if (s.err) {
+    cls = "stale";
+    // err_ts was in the payload from the start and nothing read it, so a
+    // failing refresher never said HOW LONG it had been failing - which is
+    // the difference between a blip and an outage. Found by a field audit.
+    const since = s.err_ts
+      ? " (since " + new Date(s.err_ts*1000).toLocaleTimeString() + ")" : "";
+    txt = "STALE" + since + " - " + s.err;
+  }
   document.getElementById("freshness").innerHTML =
     `<span class="${cls}">${esc(txt)}</span>` +
     (cls === "fresh" ? `<span class="at">${esc(at)}</span>` : "");
