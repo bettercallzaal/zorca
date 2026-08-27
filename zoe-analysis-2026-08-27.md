@@ -46,48 +46,65 @@ bot messages are then classified. The residual type, `conversational answer`,
 is a genuine category (ZOE replying in prose to something Zaal said), not a
 leftover pile.
 
-Reply rate here is stricter than the 8.6% headline figure: a message counts
-as replied-to only if it was the **last** bot message before a Zaal message
-within 30 minutes. 405 of Zaal's 505 messages attribute to a preceding ZOE
-message this way; the other 100 he opened cold.
+**Correction, same day:** the first published version of this table matched
+button rows as the contiguous string `POST REGEN SKIP`. The exporter writes
+inline-keyboard labels separated by whitespace and newlines, so **329 social
+drafts were misfiled** - 218 as `conversational answer`, 85 as `work report`,
+26 as `event promo`. Matching is now whitespace-normalised. Every number
+below is from the corrected pass. The direction of every conclusion held and
+sharpened: the ask band grew, the answer band shrank, and the gap between
+them stayed in the same order of magnitude. Two types changed shape and any
+lane holding the old figures should re-read them here:
 
-| Type | N | % | Mar | Apr | May | Jun | Jul | Aug | Reply rate |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| grill decision card | 2,977 | 30.9% | 0 | 0 | 0 | 0 | 0 | 2,977 | **0.03%** |
-| conversational answer | 1,220 | 12.7% | 119 | 264 | 225 | 262 | 226 | 124 | **21.07%** |
-| idle-session nag | 1,144 | 11.9% | 4 | 6 | 0 | 165 | 956 | 13 | 1.57% |
-| research deliverable | 998 | 10.4% | 0 | 0 | 0 | 92 | 505 | 401 | 0.60% |
-| social draft approval | 413 | 4.3% | 0 | 0 | 198 | 88 | 31 | 96 | 0.24% |
-| watchdog/restart | 266 | 2.8% | 0 | 1 | 0 | 0 | 0 | 265 | 0.00% |
-| usage tip | 219 | 2.3% | 0 | 0 | 219 | 0 | 0 | 0 | 4.57% |
-| progress filler | 211 | 2.2% | 4 | 4 | 38 | 76 | 82 | 7 | 2.84% |
-| failure report | 205 | 2.1% | 10 | 23 | 0 | 3 | 96 | 73 | **9.76%** |
-| grill / decision question | 195 | 2.0% | 0 | 0 | 0 | 0 | 71 | 124 | 3.59% |
-| test-script broadcast | 194 | 2.0% | 0 | 169 | 25 | 0 | 0 | 0 | 2.06% |
-| research push (ZOE TIP) | 174 | 1.8% | 0 | 174 | 0 | 0 | 0 | 0 | 2.30% |
-| recurring status report | 164 | 1.7% | 0 | 0 | 0 | 4 | 60 | 100 | 0.00% |
-| work report | 151 | 1.6% | 27 | 12 | 76 | 16 | 18 | 2 | **21.85%** |
-| build-candidate approval | 129 | 1.3% | 0 | 0 | 0 | 0 | 0 | 129 | 0.00% |
-| scheduled brief | 128 | 1.3% | 0 | 30 | 62 | 29 | 7 | 0 | 2.34% |
-| evening reflection | 104 | 1.1% | 0 | 0 | 28 | 33 | 26 | 17 | 6.73% |
-| provider limit / credits | 99 | 1.0% | 0 | 1 | 0 | 0 | 2 | 96 | 0.00% |
-| teammate mention relay | 84 | 0.9% | 0 | 0 | 0 | 0 | 64 | 20 | 1.19% |
-| loop status | 80 | 0.8% | 0 | 0 | 0 | 80 | 0 | 0 | 3.75% |
-| agent-bus relay | 75 | 0.8% | 0 | 0 | 0 | 0 | 0 | 75 | 0.00% |
-| grill answer receipt | 72 | 0.7% | 0 | 0 | 0 | 0 | 68 | 4 | 12.50% |
-| ritual nudge | 62 | 0.6% | 0 | 0 | 0 | 0 | 0 | 62 | 1.61% |
-| subtask lifecycle | 56 | 0.6% | 0 | 0 | 4 | 26 | 26 | 0 | 3.57% |
-| affirmation prose | 48 | 0.5% | 0 | 0 | 0 | 0 | 0 | 48 | 0.00% |
-| bot activity log | 42 | 0.4% | 0 | 0 | 0 | 0 | 19 | 23 | 0.00% |
-| event promo | 28 | 0.3% | 0 | 0 | 10 | 10 | 4 | 4 | 0.00% |
-| cost report | 24 | 0.2% | 0 | 0 | 0 | 0 | 0 | 24 | 0.00% |
-| stall/stale nag | 22 | 0.2% | 0 | 0 | 0 | 3 | 0 | 19 | 4.55% |
-| capture ack | 14 | 0.1% | 0 | 0 | 0 | 1 | 8 | 5 | **21.43%** |
-| empty/noise | 12 | 0.1% | 0 | 0 | 12 | 0 | 0 | 0 | 0.00% |
-| system error | 10 | 0.1% | 4 | 6 | 0 | 0 | 0 | 0 | **70.00%** |
-| cockpit digest | 5 | 0.1% | 0 | 0 | 0 | 0 | 4 | 1 | 0.00% |
-| self-throttle notice | 2 | 0.0% | 0 | 0 | 0 | 2 | 0 | 0 | 50.00% |
-| **TOTAL** | **9,627** | 100% | 168 | 690 | 897 | 890 | 2,273 | 4,709 | **4.21%** |
+- `event promo` was **28 messages; it is 2.** The fractal and cobuild promos
+  were social drafts carrying approval buttons, not announcements.
+- `recurring status report` was one type of 164; it is **four senders** -
+  `fleet report` (103), `ecosystem watch` (60), `team tracker` (1), plus the
+  `cockpit digest` (5) that was always separate.
+
+Reply rate is stricter than the 8.6% headline figure: a message counts as
+replied-to only if it was the **last** bot message before a Zaal message
+within 30 minutes. 405 of Zaal's 505 messages attribute this way; the other
+100 he opened cold. Both attributions are printed - see the caveat below.
+
+| Type | N | %% | Mar | Apr | May | Jun | Jul | Aug | ceiling | floor |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| grill decision card | 2,977 | 30.9% | 0 | 0 | 0 | 0 | 0 | 2,977 | 0.03% | 0.03% |
+| idle-session nag | 1,144 | 11.9% | 4 | 6 | 0 | 165 | 956 | 13 | 1.57% | 2.23% |
+| conversational answer | 1,004 | 10.4% | 119 | 264 | 111 | 198 | 207 | 105 | **24.80%** | 22.37% |
+| research deliverable | 998 | 10.4% | 0 | 0 | 0 | 92 | 505 | 401 | 0.60% | 0.72% |
+| social draft approval | 740 | 7.7% | 0 | 0 | 388 | 171 | 61 | 120 | 2.16% | 2.62% |
+| watchdog/restart | 266 | 2.8% | 0 | 1 | 0 | 0 | 0 | 265 | 0.00% | 0.09% |
+| usage tip | 219 | 2.3% | 0 | 0 | 219 | 0 | 0 | 0 | 4.57% | 5.46% |
+| progress filler | 211 | 2.2% | 4 | 4 | 38 | 76 | 82 | 7 | 2.84% | 9.21% |
+| failure report | 205 | 2.1% | 10 | 23 | 0 | 3 | 96 | 73 | **9.76%** | 8.63% |
+| grill / decision question | 195 | 2.0% | 0 | 0 | 0 | 0 | 71 | 124 | 3.59% | 2.82% |
+| test-script broadcast | 194 | 2.0% | 0 | 169 | 25 | 0 | 0 | 0 | 2.06% | 2.32% |
+| research push (ZOE TIP) | 174 | 1.8% | 0 | 174 | 0 | 0 | 0 | 0 | 2.30% | 2.78% |
+| build-candidate approval | 129 | 1.3% | 0 | 0 | 0 | 0 | 0 | 129 | 0.00% | 0.00% |
+| scheduled brief | 128 | 1.3% | 0 | 30 | 62 | 29 | 7 | 0 | 2.34% | 2.60% |
+| evening reflection | 104 | 1.1% | 0 | 0 | 28 | 33 | 26 | 17 | 6.73% | 7.90% |
+| fleet report | 103 | 1.1% | 0 | 0 | 0 | 0 | 29 | 74 | 0.00% | 0.80% |
+| provider limit / credits | 99 | 1.0% | 0 | 1 | 0 | 0 | 2 | 96 | 0.00% | 0.00% |
+| teammate mention relay | 84 | 0.9% | 0 | 0 | 0 | 0 | 64 | 20 | 1.19% | 0.19% |
+| loop status | 80 | 0.8% | 0 | 0 | 0 | 80 | 0 | 0 | 3.75% | 4.34% |
+| agent-bus relay | 75 | 0.8% | 0 | 0 | 0 | 0 | 0 | 75 | 0.00% | 0.60% |
+| grill answer receipt | 72 | 0.7% | 0 | 0 | 0 | 0 | 68 | 4 | **12.50%** | 9.15% |
+| work report | 66 | 0.7% | 27 | 12 | 8 | 7 | 11 | 1 | **39.39%** | 36.99% |
+| ritual nudge | 62 | 0.6% | 0 | 0 | 0 | 0 | 0 | 62 | 1.61% | 3.20% |
+| ecosystem watch | 60 | 0.6% | 0 | 0 | 0 | 3 | 31 | 26 | 0.00% | 0.00% |
+| subtask lifecycle | 56 | 0.6% | 0 | 0 | 4 | 26 | 26 | 0 | 3.57% | 2.68% |
+| affirmation prose | 48 | 0.5% | 0 | 0 | 0 | 0 | 0 | 48 | 0.00% | 0.00% |
+| bot activity log | 42 | 0.4% | 0 | 0 | 0 | 0 | 19 | 23 | 0.00% | 0.00% |
+| cost report | 24 | 0.2% | 0 | 0 | 0 | 0 | 0 | 24 | 0.00% | 0.00% |
+| stall/stale nag | 22 | 0.2% | 0 | 0 | 0 | 3 | 0 | 19 | 4.55% | 8.33% |
+| capture ack | 14 | 0.1% | 0 | 0 | 0 | 1 | 8 | 5 | **21.43%** | 9.62% |
+| empty/noise | 12 | 0.1% | 0 | 0 | 12 | 0 | 0 | 0 | 0.00% | 0.00% |
+| system error | 10 | 0.1% | 4 | 6 | 0 | 0 | 0 | 0 | **70.00%** | 80.66% |
+| cockpit digest | 5 | 0.1% | 0 | 0 | 0 | 0 | 4 | 1 | 0.00% | 0.00% |
+| event promo | 2 | 0.0% | 0 | 0 | 2 | 0 | 0 | 0 | 0.00% | 0.00% |
+| self-throttle notice | 2 | 0.0% | 0 | 0 | 0 | 2 | 0 | 0 | **50.00%** | 50.00% |
+| team tracker | 1 | 0.0% | 0 | 0 | 0 | 1 | 0 | 0 | 0.00% | 0.00% |
 
 ## What this attribution can and cannot say
 
@@ -102,65 +119,49 @@ the one that worked, so **1,659 messages (80.4%) sat inside a window that
 produced a reply and cannot be shown to have earned any of it.** One reply
 marks a whole burst answered.
 
-Re-running every figure with the opposite rule - split each reply's credit
-evenly across all messages in its window - moves the bands and does not move
-the conclusion:
-
-| Band | ceiling (last-message) | floor (split-credit) |
-|---|--:|--:|
-| ANSWER | 17.64% | 16.45% |
-| ASK | 0.58% | 0.89% |
-| BROADCAST | 1.97% | 2.18% |
-
-Note the direction: split-credit *raises* ASK and BROADCAST, because credit
-bleeds onto the bursty classes that happened to be nearby. Neither method is
-the truth. The defensible claim is the ordering and its magnitude - **ANSWER
-outperforms ASK by 20-30x under either rule** - and per-type rates should be
-read as upper bounds, most inflated for the classes that arrive in bursts.
+The `floor` column re-runs every figure with the opposite rule: split each
+reply's credit evenly across all messages in its window. Note the direction -
+split-credit *raises* the bursty classes, because credit bleeds onto whatever
+was standing nearby. So the caveat is not "true rates are lower" uniformly.
+It is: **per-type rates are upper bounds, most inflated for the classes that
+arrive in bursts.** Neither rule is the truth. What survives both is the
+ordering and its magnitude.
 
 ## The one line the table is saying
 
 Every type divides into three bands: ZOE **answering** him, ZOE **asking**
 him for a tap, and ZOE **broadcasting** at him unprompted.
 
-| Band | N | % | Mar | Apr | May | Jun | Jul | Aug | Reply rate |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| ANSWER (responds to him) | 1,814 | 18.8% | 154 | 286 | 343 | 461 | 428 | 142 | **17.64%** |
-| ASK (wants a tap) | 4,964 | 51.6% | 4 | 6 | 198 | 256 | 1,122 | 3,378 | **0.58%** |
-| BROADCAST (unsolicited) | 2,849 | 29.6% | 10 | 398 | 356 | 173 | 723 | 1,189 | **1.97%** |
+| Band | N | % | Mar | Apr | May | Jun | Jul | Aug | ceiling | floor |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| ANSWER (responds to him) | 1,513 | 15.7% | 154 | 286 | 161 | 388 | 402 | 122 | **20.16%** | **19.13%** |
+| ASK (wants a tap) | 5,291 | 55.0% | 4 | 6 | 388 | 339 | 1,152 | 3,402 | **0.83%** | **1.01%** |
+| BROADCAST (unsolicited) | 2,823 | 29.3% | 10 | 398 | 348 | 163 | 719 | 1,185 | 1.98% | 2.20% |
 
-**Answering is 30x more likely to get a reply than asking. ZOE went from
-91.7% answering to 3.0% answering.**
+**Answering outperforms asking by 24x under last-message credit and 19x under
+split credit.** The ordering is the finding; the exact rates are not.
 
-| Month | ANSWER messages | total | answer share |
-|---|--:|--:|--:|
-| Mar | 154 | 168 | **91.7%** |
-| Apr | 286 | 690 | 41.4% |
-| May | 343 | 897 | 38.2% |
-| Jun | 461 | 890 | 51.8% |
-| Jul | 428 | 2,273 | 18.8% |
-| Aug | 142 | 4,709 | **3.0%** |
-
-The absolute number of answering messages barely moved - 154 in March, 142 in
-August. **ZOE never got better or worse at answering. It buried the answers
-under 4,567 other messages.** More than half of everything it has ever sent
-(51.6%) is a request for a tap that lands 0.58% of the time.
+**55.0% of everything ZOE has ever sent is a request for a tap that lands
+under 1% of the time.**
 
 ## Reading the table
 
 - **The grill card is the single largest thing ZOE does** - 30.9% of its
-  entire life, all of it in one month, at a 0.03% reply rate. 22 sweep runs,
-  largest 372 cards, queues up to 573 items, and in 2,415 cards the index had
-  already overrun the total (cards reading "364/363"): the backlog grew
-  faster than the sweep drained it and ZOE kept counting.
+  entire life, all of it in one month, at a 0.03% reply rate under both
+  rules. 22 sweep runs, largest 372 cards, queues up to 573 items, and in
+  2,415 cards the index had already overrun the total (cards reading
+  "364/363"): the backlog grew faster than the sweep drained it and ZOE kept
+  counting.
 - **The types Zaal answers are the ones where ZOE has something of his in
-  hand**: system errors (70%), work reports (21.85%), capture
-  acknowledgements (21.43%), conversational answers (21.07%), failure
-  reports (9.76%). Every one is ZOE responding to a thing Zaal started.
-- **The types he never answers are the scheduled ones**: watchdog restarts,
-  recurring status reports, build-candidate approvals, cost reports, bot
-  activity logs, agent-bus relays, event promos, affirmation prose - **1,116
-  messages at a combined 0.00%.** Not one reply, ever.
+  hand**: system errors (70%), work reports (39.4%), conversational answers
+  (24.8%), capture acknowledgements (21.4%), grill answer receipts (12.5%),
+  failure reports (9.8%). Every one is ZOE responding to a thing Zaal
+  started.
+- **Twelve types drew zero replies in 151 days - 854 messages, not one
+  answer**: watchdog restarts (266), build-candidate approvals (129), fleet
+  reports (103), provider-limit alarms (99), agent-bus relays (75), ecosystem
+  watch (60), affirmation prose (48), bot activity logs (42), cost reports
+  (24), cockpit digests (5), event promos (2), team tracker (1).
 - **Research is the most expensive thing that nobody reads**: 998
   deliverables, 0.60% reply rate. **18.5% of them (185) contain no research
   at all** - they are quota or auth failures wearing a research header
@@ -183,12 +184,12 @@ reply rates collapsed too, while they were still being sent.**
 
 | Class | Mar | Apr | May | Jun | Jul | Aug |
 |---|--:|--:|--:|--:|--:|--:|
-| conversational answer | **56.3%** (67/119) | 39.4% (104/264) | 22.7% (51/225) | 6.1% (16/262) | 7.5% (17/226) | **1.6%** (2/124) |
-| work report | **70.4%** (19/27) | 25.0% (3/12) | 9.2% (7/76) | 25.0% (4/16) | 0% (0/18) | 0% (0/2) |
+| conversational answer | **56.3%** (67/119) | 39.4% (104/264) | 37.8% (42/111) | 8.6% (17/198) | 8.2% (17/207) | **1.9%** (2/105) |
+| work report | **70.4%** (19/27) | 25.0% (3/12) | 0% (0/8) | 57.1% (4/7) | 0% (0/11) | 0% (0/1) |
 | failure report | 50.0% (5/10) | 52.2% (12/23) | - | 0% (0/3) | 1.0% (1/96) | 2.7% (2/73) |
-| **ANSWER band** | **59.1%** (91/154) | 39.2% (112/286) | 17.8% (61/343) | 5.4% (25/461) | 6.5% (28/428) | **2.1%** (3/142) |
+| **ANSWER band** | **59.1%** (91/154) | 39.2% (112/286) | 28.0% (45/161) | 6.7% (26/388) | 7.0% (28/402) | **2.5%** (3/122) |
 
-ZOE still sent 124 conversational answers in August. Two were answered. In
+ZOE still sent 105 conversational answers in August. Two were answered. In
 March the same class ran at 56.3%.
 
 | Month | replies earned | messages sent |
@@ -213,6 +214,9 @@ messages, Jul-Aug only, 3.6% answered**. Orchestration gates live in the
 orchestration DB, a surface Zaal cannot reach from his phone (that is
 `ZOE-CENTER.md` section 3's own point). Their answer rate is evidence about
 that surface, not about this one, and the two must not be averaged.
+
+**Send-site labels for the zero-reply types are in
+`docs/zoe-send-site-labels.md`.**
 
 ## What he asked for, in his own words
 
@@ -284,7 +288,7 @@ allowance measured against the cadence he actually stated (2-4/day). When the
 budget is spent, everything else queues or goes to a surface he pulls from.
 A prompt instruction was given on 2026-04-05 and violated 22x for 143
 straight days - so the ceiling must live in the sender, not the model. The
-budget is spent on the answer band first: it is 18.8% of traffic and 79% of
+budget is spent on the answer band first: it is 15.7% of traffic and 75% of
 all replies ZOE ever earned.
 
 **2. Never enumerate a queue into the chat.**
@@ -295,23 +299,23 @@ chat gets one line: how many, and the single most important one.
 
 **3. Answer, do not report - and cut volume anyway, because answers stop
 working too.**
-Answering draws a reply **17.64%** of the time; asking for a tap draws
-**0.58%** - a 30x gap. ZOE's answering share fell from **91.7% to 3.0%**
-while its absolute answering volume held flat (154 messages in March, 142 in
+Answering draws a reply **20.16%** of the time; asking for a tap draws
+**0.83%** - a 24x gap (19x under split-credit). ZOE's answering share fell from **91.7% to 2.6%**
+while its absolute answering volume held flat (154 messages in March, 122 in
 August). It did not get worse at answering; it buried the answers. v2's
 default is silence plus breakage, and the answer band is the only band that
 grows. Status is pulled (he types "status" - one of his top terms), never
-pushed. The 1,116 messages across watchdog restarts, recurring status
+pushed. The 854 messages across twelve types - watchdog restarts, fleet
 reports, build-candidate approvals, cost reports, bot activity logs,
-agent-bus relays, event promos and affirmation prose drew **zero replies in
-151 days** and should not exist in the chat at all. But rebalancing alone
-will not work: the ANSWER band itself fell from **59.1% to 2.1%** answered
+agent-bus relays, ecosystem watch and affirmation prose among them - drew
+**zero replies in 151 days** and should not exist in the chat at all. But rebalancing alone
+will not work: the ANSWER band itself fell from **59.1% to 2.5%** answered
 across the same window. At August volume Zaal ignores answers too, so the
 budget in rank 1 is not optional trim around this fix - it is the
 precondition for it.
 
 **4. Every ask carries an owner, a deadline and an expiry.**
-The ask band is **51.6% of everything ZOE has ever sent and lands 0.58% of
+The ask band is **55.0% of everything ZOE has ever sent and lands under 1% of
 the time**; 65 of 66 resends died at "resend 3/3". An ask that goes unanswered past its deadline must take its default
 action and say so in one line, not re-send. Resends taught him the messages
 were ignorable.
