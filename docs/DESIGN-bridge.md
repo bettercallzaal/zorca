@@ -830,6 +830,32 @@ make, not this lane's to pre-empt.
 
 Tracked as **open question 7** in section 10.
 
+### Issue templates - drafted 2026-08-27, NOT placed
+
+`docs/drafts/issue-templates/` holds four files: `bug_report.md`,
+`safety_rail.md`, `feature_request.md` and a `config.yml`. **Content only.**
+
+GitHub reads templates from `.github/ISSUE_TEMPLATE/`, and this repo has no
+`.github/` at all - so nothing there is live and nothing changes behaviour
+where it sits. **Placement was named as Zaal's and is deliberately not made:**
+moving them turns them on in the issue composer of a public repo, which is a
+publishing decision rather than a file move. The one-line `git mv` is written
+out in that directory's README.
+
+Two things worth knowing without reading them:
+
+- `safety_rail.md` is the one that earns its place. Every rail here was bought
+  with a real failure, and a rail regressing looks like everything working
+  with one message that should not have been sent. It asks failed-open vs
+  failed-shut, and asks whether anything irreversible happened **first**.
+- **None of the templates asks for logs, config or pane text.** Pane text is
+  real terminal output; actuator config carries a queue host and path; a
+  public issue body is world-readable forever. They ask for the shape of what
+  happened and route the rest privately.
+
+That last choice is generic hygiene and **does not depend on open question
+7**. Nothing in the templates restates or resolves that field.
+
 ### Untouched, on instruction - do not assume otherwise
 
 `zorca-gui2` and its files. `bin/zorca`. The delete call. Issue template
