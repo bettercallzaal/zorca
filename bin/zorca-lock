@@ -1,0 +1,37 @@
+#!/bin/zsh
+# zorca-lock claim|heartbeat|check|release|status  [owner-label]
+# One orchestrator at a time. Three ran at once on 2026-08-27 because nothing
+# refused the second. The lock is a JSON file; "fresh" means heartbeat < 30 min.
+#   claim     take the lock (fails if another owner holds a fresh one)
+#   heartbeat refresh it (call each pass)
+#   check     exit 0 = free or yours, exit 3 = held fresh by someone else
+#   release   remove it
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
+L="$HOME/.zao/orchestrator.lock"; CMD="${1:-status}"; OWNER="${2:-${ZORCA_OWNER:-$(tty 2>/dev/null || echo unknown)@$(hostname -s)}}"
+python3 - "$L" "$CMD" "$OWNER" "$PPID" <<'PY'
+import json,os,sys,time
+L,cmd,owner,pid=sys.argv[1:5]; now=time.time(); FRESH=30*60
+def load():
+    try: return json.load(open(L))
+    except Exception: return None
+def save(d): json.dump(d,open(L,'w'),indent=1)
+d=load(); fresh=bool(d) and now-d.get('heartbeat',0)<FRESH; mine=bool(d) and d.get('owner')==owner
+if cmd=='status':
+    if not d: print('free'); sys.exit(0)
+    age=int((now-d.get('heartbeat',0))/60); print(f"{'fresh' if fresh else 'STALE'} owner={d['owner']} pid={d.get('pid')} age={age}m claimed={d.get('claimed')}"); sys.exit(0)
+if cmd=='check':
+    if d and fresh and not mine: print(f"held by {d['owner']} ({int((now-d['heartbeat'])/60)}m ago)"); sys.exit(3)
+    print('free' if not (d and fresh) else 'yours'); sys.exit(0)
+if cmd=='claim':
+    if d and fresh and not mine: print(f"REFUSED: held by {d['owner']}"); sys.exit(3)
+    save({'owner':owner,'pid':pid,'cwd':os.getcwd(),'claimed':d['claimed'] if mine and d else time.strftime('%F %H:%M'),'heartbeat':now}); print(f"claimed by {owner}"); sys.exit(0)
+if cmd=='heartbeat':
+    if not (d and mine): print('not yours; claim first'); sys.exit(3)
+    d['heartbeat']=now; save(d); print('ok'); sys.exit(0)
+if cmd=='release':
+    if d and not mine and fresh: print(f"REFUSED: held by {d['owner']}"); sys.exit(3)
+    try: os.remove(L)
+    except FileNotFoundError: pass
+    print('released'); sys.exit(0)
+print('usage: zorca-lock claim|heartbeat|check|release|status [owner]'); sys.exit(2)
+PY
