@@ -37,52 +37,113 @@ message 574 chars, median 514, p90 1,146.
 
 ---
 
-## Where the August traffic actually went
+## What ZOE actually says: the real taxonomy
 
-August alone: 4,709 messages, mean **174 per day**, peak **421 in one day**.
+The first pass classified by substring and dropped most traffic into `other`.
+That bucket was read - 300 messages sampled evenly across all 151 days - and
+the categories below were derived from what is in it, not guessed. All 9,627
+bot messages are then classified. The residual type, `conversational answer`,
+is a genuine category (ZOE replying in prose to something Zaal said), not a
+leftover pile.
 
-| What | Count | Reply rate |
-|---|---|---|
-| Grill decision cards ("N/N") | 2,977 | **0.03%** |
-| Idle-session nags | 1,152 | 1.65% |
-| Social draft approvals | 669 | 3.44% |
-| Repo/site audits | 357 | 0.84% |
-| Watchdog restart notices | 317 | 0.63% |
-| Failure reports | 192 | **19.27%** |
-| "Decision needed" | 175 | 3.43% |
-| Fleet reports | 158 | 3.80% |
-| Credits-exhausted alarms | 149 | 1.34% |
-| Acknowledgements | 143 | 4.90% |
+Reply rate here is stricter than the 8.6% headline figure: a message counts
+as replied-to only if it was the **last** bot message before a Zaal message
+within 30 minutes. 405 of Zaal's 505 messages attribute to a preceding ZOE
+message this way; the other 100 he opened cold.
 
-Two facts sit on top of that table:
+| Type | N | % | Mar | Apr | May | Jun | Jul | Aug | Reply rate |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| grill decision card | 2,977 | 30.9% | 0 | 0 | 0 | 0 | 0 | 2,977 | **0.03%** |
+| conversational answer | 1,220 | 12.7% | 119 | 264 | 225 | 262 | 226 | 124 | **21.07%** |
+| idle-session nag | 1,144 | 11.9% | 4 | 6 | 0 | 165 | 956 | 13 | 1.57% |
+| research deliverable | 998 | 10.4% | 0 | 0 | 0 | 92 | 505 | 401 | 0.60% |
+| social draft approval | 413 | 4.3% | 0 | 0 | 198 | 88 | 31 | 96 | 0.24% |
+| watchdog/restart | 266 | 2.8% | 0 | 1 | 0 | 0 | 0 | 265 | 0.00% |
+| usage tip | 219 | 2.3% | 0 | 0 | 219 | 0 | 0 | 0 | 4.57% |
+| progress filler | 211 | 2.2% | 4 | 4 | 38 | 76 | 82 | 7 | 2.84% |
+| failure report | 205 | 2.1% | 10 | 23 | 0 | 3 | 96 | 73 | **9.76%** |
+| grill / decision question | 195 | 2.0% | 0 | 0 | 0 | 0 | 71 | 124 | 3.59% |
+| test-script broadcast | 194 | 2.0% | 0 | 169 | 25 | 0 | 0 | 0 | 2.06% |
+| research push (ZOE TIP) | 174 | 1.8% | 0 | 174 | 0 | 0 | 0 | 0 | 2.30% |
+| recurring status report | 164 | 1.7% | 0 | 0 | 0 | 4 | 60 | 100 | 0.00% |
+| work report | 151 | 1.6% | 27 | 12 | 76 | 16 | 18 | 2 | **21.85%** |
+| build-candidate approval | 129 | 1.3% | 0 | 0 | 0 | 0 | 0 | 129 | 0.00% |
+| scheduled brief | 128 | 1.3% | 0 | 30 | 62 | 29 | 7 | 0 | 2.34% |
+| evening reflection | 104 | 1.1% | 0 | 0 | 28 | 33 | 26 | 17 | 6.73% |
+| provider limit / credits | 99 | 1.0% | 0 | 1 | 0 | 0 | 2 | 96 | 0.00% |
+| teammate mention relay | 84 | 0.9% | 0 | 0 | 0 | 0 | 64 | 20 | 1.19% |
+| loop status | 80 | 0.8% | 0 | 0 | 0 | 80 | 0 | 0 | 3.75% |
+| agent-bus relay | 75 | 0.8% | 0 | 0 | 0 | 0 | 0 | 75 | 0.00% |
+| grill answer receipt | 72 | 0.7% | 0 | 0 | 0 | 0 | 68 | 4 | 12.50% |
+| ritual nudge | 62 | 0.6% | 0 | 0 | 0 | 0 | 0 | 62 | 1.61% |
+| subtask lifecycle | 56 | 0.6% | 0 | 0 | 4 | 26 | 26 | 0 | 3.57% |
+| affirmation prose | 48 | 0.5% | 0 | 0 | 0 | 0 | 0 | 48 | 0.00% |
+| bot activity log | 42 | 0.4% | 0 | 0 | 0 | 0 | 19 | 23 | 0.00% |
+| event promo | 28 | 0.3% | 0 | 0 | 10 | 10 | 4 | 4 | 0.00% |
+| cost report | 24 | 0.2% | 0 | 0 | 0 | 0 | 0 | 24 | 0.00% |
+| stall/stale nag | 22 | 0.2% | 0 | 0 | 0 | 3 | 0 | 19 | 4.55% |
+| capture ack | 14 | 0.1% | 0 | 0 | 0 | 1 | 8 | 5 | **21.43%** |
+| empty/noise | 12 | 0.1% | 0 | 0 | 12 | 0 | 0 | 0 | 0.00% |
+| system error | 10 | 0.1% | 4 | 6 | 0 | 0 | 0 | 0 | **70.00%** |
+| cockpit digest | 5 | 0.1% | 0 | 0 | 0 | 0 | 4 | 1 | 0.00% |
+| self-throttle notice | 2 | 0.0% | 0 | 0 | 0 | 2 | 0 | 0 | 50.00% |
+| **TOTAL** | **9,627** | 100% | 168 | 690 | 897 | 890 | 2,273 | 4,709 | **4.21%** |
 
-1. **The single biggest thing ZOE did in August was enumerate a queue into a
-   chat window.** 2,977 numbered decision cards across **22 sweep runs**, the
-   largest run **372 cards**, against queues of up to **573 items**. Eleven
-   were answered inside 30 minutes. **0.37%.** In 2,415 of them the card index
-   had already passed the queue total (cards reading "364/363") - the backlog
-   was growing faster than the sweep could drain it, and ZOE kept counting
-   anyway.
-2. **The only thing Zaal reliably answers is breakage.** Failure reports draw
-   a reply **19.3%** of the time - 640x the rate of a decision card. He shows
-   up when something is broken. He does not show up for a feed.
+## The one line the table is saying
 
-Supporting noise measurements:
+Every type divides into three bands: ZOE **answering** him, ZOE **asking**
+him for a tap, and ZOE **broadcasting** at him unprompted.
 
-- **34.4% of all bot messages were exact duplicates** of another message.
-  One string was sent **339 times**. A watchdog line was sent **114 times**.
-- **1,299 bursts** of 2+ messages inside 60 seconds, **3,216 messages** in
-  bursts, largest burst **31 messages**.
-- **21% of all messages (2,059) were sent between 22:00 and 07:00.**
-- The same posting failure was reported **138 times**; the same
-  "FLEET BRAIN DOWN (NO_CREDITS)" alarm **57 times**. An alarm sent 57 times
-  is wallpaper, not an alarm.
-- **32% of ZOE's traffic (3,079 messages) asked Zaal for something.** He
-  answered **12.3%** of it. Of 66 drafts that ZOE re-sent when unanswered,
-  **65 reached the final "resend 3/3" without ever being tapped** - 200
-  resend messages, near-zero yield.
+| Band | N | % | Mar | Apr | May | Jun | Jul | Aug | Reply rate |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| ANSWER (responds to him) | 1,814 | 18.8% | 154 | 286 | 343 | 461 | 428 | 142 | **17.64%** |
+| ASK (wants a tap) | 4,964 | 51.6% | 4 | 6 | 198 | 256 | 1,122 | 3,378 | **0.58%** |
+| BROADCAST (unsolicited) | 2,849 | 29.6% | 10 | 398 | 356 | 173 | 723 | 1,189 | **1.97%** |
 
----
+**Answering is 30x more likely to get a reply than asking. ZOE went from
+91.7% answering to 3.0% answering.**
+
+| Month | ANSWER messages | total | answer share |
+|---|--:|--:|--:|
+| Mar | 154 | 168 | **91.7%** |
+| Apr | 286 | 690 | 41.4% |
+| May | 343 | 897 | 38.2% |
+| Jun | 461 | 890 | 51.8% |
+| Jul | 428 | 2,273 | 18.8% |
+| Aug | 142 | 4,709 | **3.0%** |
+
+The absolute number of answering messages barely moved - 154 in March, 142 in
+August. **ZOE never got better or worse at answering. It buried the answers
+under 4,567 other messages.** More than half of everything it has ever sent
+(51.6%) is a request for a tap that lands 0.58% of the time.
+
+## Reading the table
+
+- **The grill card is the single largest thing ZOE does** - 30.9% of its
+  entire life, all of it in one month, at a 0.03% reply rate. 22 sweep runs,
+  largest 372 cards, queues up to 573 items, and in 2,415 cards the index had
+  already overrun the total (cards reading "364/363"): the backlog grew
+  faster than the sweep drained it and ZOE kept counting.
+- **The types Zaal answers are the ones where ZOE has something of his in
+  hand**: system errors (70%), work reports (21.85%), capture
+  acknowledgements (21.43%), conversational answers (21.07%), failure
+  reports (9.76%). Every one is ZOE responding to a thing Zaal started.
+- **The types he never answers are the scheduled ones**: watchdog restarts,
+  recurring status reports, build-candidate approvals, cost reports, bot
+  activity logs, agent-bus relays, event promos, affirmation prose - **1,116
+  messages at a combined 0.00%.** Not one reply, ever.
+- **Research is the most expensive thing that nobody reads**: 998
+  deliverables, 0.60% reply rate. **18.5% of them (185) contain no research
+  at all** - they are quota or auth failures wearing a research header
+  ("You've hit your weekly limit", "no output - check claude auth"). A
+  further 10.2% are verbatim repeats of an earlier identical deliverable; the
+  same five topic lines were re-sent 30 or more times each.
+- **The nag migrated rather than stopped**: idle-session nags peaked at 956
+  in July, then near-vanished in August (13) - replaced one-for-one by the
+  grill card. Volume was never fixed, only relabelled.
+- **ZOE noticed once.** In June it sent: *"I've sent 3 things you haven't
+  replied to. I'll dial back - raising my bar so I only ping when it really
+  matters."* Two such messages exist in 151 days. Traffic tripled afterwards.
 
 ## What he asked for, in his own words
 
@@ -153,7 +214,9 @@ Ranked by weight of evidence and by how much each would move the 392:1 ratio.
 allowance measured against the cadence he actually stated (2-4/day). When the
 budget is spent, everything else queues or goes to a surface he pulls from.
 A prompt instruction was given on 2026-04-05 and violated 22x for 143
-straight days - so the ceiling must live in the sender, not the model.
+straight days - so the ceiling must live in the sender, not the model. The
+budget is spent on the answer band first: it is 18.8% of traffic and 79% of
+all replies ZOE ever earned.
 
 **2. Never enumerate a queue into the chat.**
 2,977 cards, 0.37% answered, index overrunning the total 2,415 times. One
@@ -161,17 +224,21 @@ open ask at a time, and the next card does not send until the current one is
 resolved or expires. If a queue has 573 items, that is a dashboard, and the
 chat gets one line: how many, and the single most important one.
 
-**3. Answer, do not report.**
-Failure reports: 19.3% reply. Everything else: under 5%. v2's default is
-silence plus breakage. Status is pulled (he types "status" - it is one of his
-top terms), never pushed. Fleet reports, repo audits, watchdog restarts that
-self-healed and cost lines all move off Telegram entirely; the watchdog line
-that says "restarted now. No action needed." should never have been sent at
-all, 114 times or once.
+**3. Answer, do not report - this is the mechanism behind rank 1.**
+Answering draws a reply **17.64%** of the time; asking for a tap draws
+**0.58%** - a 30x gap. ZOE's answering share fell from **91.7% to 3.0%**
+while its absolute answering volume held flat (154 messages in March, 142 in
+August). It did not get worse at answering; it buried the answers. v2's
+default is silence plus breakage, and the answer band is the only band that
+grows. Status is pulled (he types "status" - one of his top terms), never
+pushed. The 1,116 messages across watchdog restarts, recurring status
+reports, build-candidate approvals, cost reports, bot activity logs,
+agent-bus relays, event promos and affirmation prose drew **zero replies in
+151 days** and should not exist in the chat at all.
 
 **4. Every ask carries an owner, a deadline and an expiry.**
-32% of traffic asked for something; 12.3% got answered; 65 of 66 resends died
-at 3/3. An ask that goes unanswered past its deadline must take its default
+The ask band is **51.6% of everything ZOE has ever sent and lands 0.58% of
+the time**; 65 of 66 resends died at "resend 3/3". An ask that goes unanswered past its deadline must take its default
 action and say so in one line, not re-send. Resends taught him the messages
 were ignorable.
 
@@ -181,8 +248,13 @@ lanes: interrupt (breakage, money, risk - Telegram now), digest (one
 scheduled roll-up), and pull (a surface he opens when he wants it). Default
 is digest.
 
-**6. Deduplicate and collapse before sending.**
-34.4% duplicate rate, one string 339 times, 138 identical failure reports.
+**6. Deduplicate and collapse before sending, and never ship a failure
+wearing a success header.**
+34.4% duplicate rate overall, one string 339 times, 138 identical failure
+reports. Worst case is research: **18.5% of 998 deliverables contained no
+research**, only a quota or auth error under a research headline, and a
+further 10.2% were verbatim repeats. A blocked job must report as blocked,
+once, in the interrupt lane - not as 185 fake deliverables.
 Identical or near-identical messages collapse into one with a count. Repeat
 alarms escalate in severity or go quiet - they never simply repeat.
 
