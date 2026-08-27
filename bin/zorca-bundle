@@ -13,7 +13,7 @@ for r in "$HOME/Documents"/*/ "$HOME/Desktop/repos"/*/ "$HOME/orca/workspaces"/*
   if git -C "$r" bundle create "$D/$name.bundle" --all --quiet 2>/dev/null; then n=$((n+1)); lines+=("$name:$ahead"); fi
 done
 # keep 7 nights
-ls -1d "$HOME/.zao/backups"/20*/ 2>/dev/null | sort | head -n -7 | xargs -I{} rm -rf {} 2>/dev/null
+ls -1d "$HOME/.zao/backups"/20*/ 2>/dev/null | sort | awk -v keep=7 '{a[NR]=$0} END{for(i=1;i<=NR-keep;i++) print a[i]}' | xargs -I{} rm -rf {} 2>/dev/null
 SUM="bundles $(date '+%F %H:%M'): $n repos with unpushed commits -> $D (${(j:, :)lines}); $skipped clean"
 echo "$SUM"; echo "$SUM" >> "$HOME/.zao/backups/bundle.log"
 DAILY="$HOME/zao-vault/daily/$(date +%F).md"; [ -f "$DAILY" ] && printf '\n- %s\n' "$SUM" >> "$DAILY"
