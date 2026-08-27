@@ -56,6 +56,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
          "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
          "stuck_candidates": 0, "stuck_observed": 0,
+         "task_counts": {}, "resolved_count": 0,
          "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
@@ -904,10 +905,17 @@ def refresh():
     dage = drafts_age()
     grill = grill_state()
     tasks_now = load_tasks(run_id)
+    # The strip needs the counts on every poll; the fold needs the rows only
+    # when it opens. Counting here keeps the lean payload two small numbers.
+    counts = {}
+    for t in tasks_now:
+        k = t.get("status") or "?"
+        counts[k] = counts.get(k, 0) + 1
     trend = trend_record(trend_values(board, tasks_now, estate, dage, grill))
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=tasks_now,
+                     task_counts=counts, resolved_count=len(resolved),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
@@ -1791,9 +1799,9 @@ function estateCell(s){
    number that means something is wrong renders warn or gold, so the strip
    is scannable without reading it. */
 function strip(s){
-  const P = s.panes || [], T = s.tasks || [];
+  const P = s.panes || [], TC = s.task_counts || null;
   const n = r => P.filter(p => p.rank === r).length;
-  const st = x => T.filter(t => t.status === x).length;
+  const st = x => (TC && TC[x]) || 0;
   const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
   const stuckAll = s.stuck || [];
   const stuck = unhandled(s, stuckAll).length;
@@ -1801,7 +1809,7 @@ function strip(s){
   const e0 = s.estate, d0 = s.drafts_age;
   const trendNow = {
     lanes_waiting: P.length ? n(3) : null,
-    tasks_done: T.length ? st("completed") : null,
+    tasks_done: TC ? st("completed") : null,
     ctx_critical: P.length ? n(0) : null,
     estate_risk: e0 ? e0.dirty + e0.unpushed + e0.noremote : null,
     drafts_queued: (d0 && d0.count !== null && d0.count !== undefined) ? d0.count : null,
@@ -2098,7 +2106,35 @@ async function load(){
     || '<span class="stamp">none</span>';
 
   /* --- rail 3: reference ------------------------------------------- */
-  document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
+  // Lanes and the watcher trail ride along in the poll - they are small,
+  // and the lane list is how a parked lane gets reopened. Tasks and
+  // resolved gates are 26 KB and are fetched only when the fold opens.
+  foldCheap(s);
+  loadDetail(false);
+}
+
+/* The reference fold's own data, fetched when it opens rather than pushed
+   on every poll. Closed is the default, so most sessions never pay for it. */
+let DETAIL = null;
+async function loadDetail(force){
+  const ref = document.getElementById("ref");
+  if (!ref.open) return;
+  if (DETAIL && !force) { detailRender(DETAIL.tasks, DETAIL.resolved); return; }
+  document.getElementById("tasks").innerHTML =
+    '<span class="stamp">loading...</span>';
+  try {
+    const d = await (await fetch("/api/state?detail=1")).json();
+    DETAIL = {tasks: d.tasks || [], resolved: d.resolved || []};
+  } catch (e) {
+    document.getElementById("tasks").innerHTML =
+      '<span class="stamp">could not load the detail - ' + esc(e.message) + '</span>';
+    return;
+  }
+  detailRender(DETAIL.tasks, DETAIL.resolved);
+}
+
+function detailRender(tasks, resolved){
+  document.getElementById("tasks").innerHTML = tasks.map((t,i) => `
     <div class="task" style="cursor:pointer" onclick='
       const el=document.getElementById("spec-"+${Number(i)});
       el.style.display = el.style.display=="none" ? "block" : "none";'>
@@ -2107,11 +2143,14 @@ async function load(){
     <div id="spec-${i}" style="display:none" class="detail"
       ><div style="white-space:normal;padding:4px 0 10px 112px">
       ${esc(t.spec)}<br><span class="stamp">${t.id} &middot; ${esc(t.updated)}</span>
-      </div></div>`).join("");
-  document.getElementById("resolved").innerHTML = s.resolved.map(g => `
+      </div></div>`).join("") || '<span class="stamp">no tasks</span>';
+  document.getElementById("resolved").innerHTML = resolved.map(g => `
     <div class="task"><span class="st st-completed">resolved</span>
       <span>${esc(g.question.slice(0,70))} &rarr; <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
+}
+
+function foldCheap(s){
   // A lane whose manifest row was refused shows the reason instead of a
   // button. Rendering a button that always 400s would make the refusal look
   // like a bug in the page rather than a fact about the row.
@@ -2158,6 +2197,11 @@ document.getElementById("since").addEventListener("toggle", function(){
 });
 document.getElementById("stripfold").addEventListener("toggle", function(){
   this.dataset.userset = "1";
+});
+// Opening the fold is what pays for its data. Re-opening refetches, so a
+// fold left open across a refresh does not show a frozen task list.
+document.getElementById("ref").addEventListener("toggle", function(){
+  if (this.open) loadDetail(true);
 });
 load(); setInterval(load, 15000);
 </script></body></html>"""
@@ -2294,9 +2338,21 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path == "/":
             self._send(200, PAGE, "text/html; charset=utf-8")
-        elif self.path == "/api/state":
+        elif self.path.split("?")[0] == "/api/state":
+            # `tasks` and `resolved` are 26 KB of the payload and render
+            # only inside the reference fold, which is closed by default.
+            # Sending them on every 15s poll ships data nobody is looking
+            # at; the counts the strip needs are two small numbers. The
+            # fold asks for the rest when it opens.
+            want = "detail=1" in self.path
             with LOCK:
-                self._send(200, json.dumps(CACHE))
+                if want:
+                    body = json.dumps(CACHE)
+                else:
+                    lean = {k: v for k, v in CACHE.items()
+                            if k not in ("tasks", "resolved")}
+                    body = json.dumps(lean)
+            self._send(200, body)
         else:
             self._send(404, "{}")
 

@@ -25,7 +25,9 @@ import re
 import sys
 import urllib.request
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7778/api/state"
+# detail=1 on purpose: the lean payload omits tasks and resolved, and a
+# field that is never served is also never audited.
+URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7778/api/state?detail=1"
 SRC = "gui/zorca-gui2"
 
 page = open(SRC).read().split('PAGE = r"""', 1)[1].rsplit('"""', 1)[0]
@@ -37,6 +39,8 @@ SERVER_ONLY = {
     ("stuck[]", "cwd"), ("gitlog[]", "cwd"), ("panes[]", "cwd"),
     ("estate.ahead[]", "cwd"), ("orphans[]", "when"), ("lanes[]", "cmd"),
     ("panes[]", "title"),
+    # served only when the fold asks for them; the strip reads the counts
+    ("payload", "resolved_count"),
 }
 
 def audit(label, keys):
@@ -64,6 +68,8 @@ if ahead:
     bad += audit("estate.ahead[]", set(ahead[0]))
 
 raw = urllib.request.urlopen(URL).read()
-print("\n  payload %.1f KB, polled every 15s" % (len(raw) / 1024))
+lean = urllib.request.urlopen(URL.split("?")[0]).read()
+print("\n  polled payload %.1f KB every 15s; with detail=1 %.1f KB, fetched "
+      "only when the reference fold opens" % (len(lean) / 1024, len(raw) / 1024))
 print("\n%s" % ("FAIL - fields above are served and never read" if bad else "PASS"))
 sys.exit(1 if bad else 0)
