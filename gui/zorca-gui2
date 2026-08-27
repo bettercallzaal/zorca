@@ -1101,6 +1101,10 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn.clear { border-color:var(--line); color:var(--dim); font-weight:400; }
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
+#filterbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+             margin:0 0 10px; }
+#filter { flex:1 1 220px; width:auto; min-width:0; }
+#filterstat { flex:1 1 100%; }
 #stripfold > summary { cursor:pointer; list-style:none; padding:2px 0 6px; }
 #stripfold > summary::-webkit-details-marker { display:none; }
 #stripfold > summary::before { content:"\25b8 "; color:var(--dim); }
@@ -1315,6 +1319,13 @@ button.mini.ack:hover { color:var(--gold); }
  <button id="needbtn" onclick='document.getElementById("needsyou")
    .scrollIntoView({behavior:"smooth", block:"start"})'>
    <span id="needcount">-</span><span class="sub" id="needsub"></span></button>
+ <div id="filterbar">
+  <input type="text" id="filter" placeholder="filter lanes by repo, task or text"
+    oninput='setFilter(this.value)' autocomplete="off" spellcheck="false">
+  <button class="mini" id="filterclear" style="display:none"
+    onclick='document.getElementById("filter").value=""; setFilter("")'>clear</button>
+  <span class="stamp" id="filterstat"></span>
+ </div>
  <details id="stripfold">
   <summary><span class="sincehead">Fleet</span>
     <span class="stamp" id="stripsummary"></span></summary>
@@ -1408,6 +1419,31 @@ function toast(msg, ok){
   setTimeout(()=>t.style.display="none", ok ? 1800 : 4000);
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+
+/* One box narrows the wall, the action list and the stuck section together.
+   At twenty-one panes a flat list is not findable, and three separate
+   filters would be three things to keep in sync by hand.
+
+   It never touches the NEEDS-YOU count. That number answers "what is
+   waiting on me", and a filter is a question about the screen, not about
+   the world - narrowing the count would make the one honest number on the
+   page depend on what happens to be typed in a box. */
+let FILTER = "";
+function hit(){
+  const q = FILTER.trim().toLowerCase();
+  if (!q) return true;
+  for (let i = 0; i < arguments.length; i++) {
+    const v = arguments[i];
+    if (v != null && String(v).toLowerCase().indexOf(q) >= 0) return true;
+  }
+  return false;
+}
+function setFilter(v){
+  FILTER = v || "";
+  const clear = document.getElementById("filterclear");
+  if (clear) clear.style.display = FILTER ? "inline-block" : "none";
+  if (LAST) render(LAST);
+}
 /* esc() leaves quotes alone, which is fine for text and NOT fine inside a
    single-quoted onclick. Lane names come from a markdown table and worktree
    paths come from disk; either can contain an apostrophe, and one would end
@@ -1620,7 +1656,7 @@ function ackBar(s, key){
 }
 
 function renderStuck(s){
-  const all = s.stuck || [];
+  const all = (s.stuck || []).filter(r => hit(r.repo, r.state, r.last_text));
   const rows = unhandled(s, all), ackedN = all.length - rows.length;
   const ordered = rows.concat(all.filter(r => ackOf(s, r.key)));
   const cand = s.stuck_candidates || 0, obs = s.stuck_observed || 0;
@@ -1657,7 +1693,8 @@ function renderStuck(s){
    row, and a button that pretended otherwise would be lying about what it
    does. */
 function renderOrphans(s){
-  const shown = s.orphans || [], total = s.orphan_total || 0;
+  const shown = (s.orphans || []).filter(r => hit(r.lane, r.doing));
+  const total = FILTER ? shown.length : (s.orphan_total || 0);
   const live = unhandled(s, shown), ackedN = shown.length - live.length;
   const rows = live.concat(shown.filter(r => ackOf(s, r.key)));
   document.getElementById("orphcount").innerHTML = total === 0
@@ -2117,8 +2154,37 @@ function unmeasured(){
   document.getElementById("head").classList.add("warn");
 }
 
+/* The last payload, kept so typing in the filter redraws from what is
+   already here instead of refetching on every keystroke. */
+let LAST = null;
+
 async function load(){
-  const s = await (await fetch("/api/state")).json();
+  let s;
+  try {
+    s = await (await fetch("/api/state")).json();
+  } catch (e) {
+    document.getElementById("freshness").innerHTML =
+      '<span class="stale">cannot reach the board - ' + esc(e.message) + '</span>';
+    document.getElementById("head").classList.add("warn");
+    return;
+  }
+  LAST = s;
+  try {
+    render(s);
+  } catch (e) {
+    // A render that throws leaves the last good frame on screen, which is
+    // a stale board that looks live - the same lie a dead refresher tells.
+    // Say it instead. Found the hard way: a temporal-dead-zone error in the
+    // filter status line stopped every update and showed nothing at all.
+    document.getElementById("freshness").innerHTML =
+      '<span class="stale">RENDER FAILED - what you are seeing is stale - '
+      + esc(e.message) + '</span>';
+    document.getElementById("head").classList.add("warn");
+    throw e;
+  }
+}
+
+function render(s){
   document.getElementById("run").textContent = s.run;
   if (!s.ts) { unmeasured(); return; }
   document.getElementById("runref").textContent = s.run;
@@ -2128,6 +2194,7 @@ async function load(){
   const acts = actions(s);
   const need = acts.length;
   const urgent = acts.filter(a => a.tier <= 1).length;
+  const actsShown = acts.filter(a => hit(a.who, a.why, a.text, a.tag));
   document.getElementById("needcount").textContent =
     need === 0 ? "0 NEED YOU" : need + " NEED YOU";
   document.getElementById("needsub").textContent = need === 0
@@ -2138,13 +2205,18 @@ async function load(){
   document.getElementById("needsyou").classList.toggle("clear", need === 0);
   strip(s);
   renderFeed(s);
-  document.getElementById("actions").innerHTML = acts.map(actRow).join("")
-    || '<div class="card">nothing needs you</div>';
+  document.getElementById("actions").innerHTML = actsShown.map(actRow).join("")
+    || `<div class="card">${FILTER
+        ? "no action matches " + esc(JSON.stringify(FILTER)) +
+          " - " + need + " hidden by the filter"
+        : "nothing needs you"}</div>`;
   trimToggles();
 
   /* --- rail 2: the wall. Free and finished lanes collapse into the
          summary; a card here means a lane that is actually running. --- */
-  const live = s.panes.filter(p => p.rank <= 4);
+  const liveAll = s.panes.filter(p => p.rank <= 4);
+  const live = liveAll.filter(p => hit(p.repo, p.state, p.tail, p.question,
+                                       p.last_text, p.cwd));
   const working = s.panes.filter(p => p.rank == 3 || p.rank == 4).length;
   const free = s.panes.filter(p => p.rank == 6).length;
   const idle = s.panes.filter(p => p.rank == 5).length;
@@ -2153,7 +2225,26 @@ async function load(){
     `<span class="${idle ? "idle" : ""}">${idle} idle</span>`;
   document.getElementById("panes").innerHTML =
     live.map(p => paneRow(p, p.rank <= 2, true)).join("")
-    || '<div class="card">no live panes</div>';
+    || `<div class="card">${FILTER
+        ? "no live lane matches " + esc(JSON.stringify(FILTER)) +
+          " - " + liveAll.length + " hidden by the filter"
+        : "no live panes"}</div>`;
+  // Placed here, after live/liveAll/actsShown exist. It sat above them
+  // first, and because it only reads them in the FILTER branch, render()
+  // threw a temporal-dead-zone ReferenceError exclusively when a filter was
+  // set - the page simply stopped updating and said nothing.
+  const fs = document.getElementById("filterstat");
+  if (!FILTER) {
+    fs.textContent = "";
+  } else {
+    const stuckAll = (s.stuck || []).length;
+    const stuckShown = (s.stuck || []).filter(r => hit(r.repo, r.state, r.last_text)).length;
+    fs.innerHTML =
+      `showing <b>${actsShown.length}</b> of ${need} actions &middot; ` +
+      `<b>${live.length}</b> of ${liveAll.length} live lanes &middot; ` +
+      `<b>${stuckShown}</b> of ${stuckAll} stuck &middot; ` +
+      `<span class="none">the count above is unfiltered on purpose</span>`;
+  }
   const e = s.estate;
   document.getElementById("aheadlist").innerHTML = !e
     ? '<span class="stamp">no worktree could be read this refresh</span>'
@@ -2325,8 +2416,19 @@ function foldCheap(s){
    resolve a gate or send a draft. */
 document.addEventListener("keydown", e => {
   const a = document.activeElement;
+  // Escape still works from inside the filter box; everything else defers
+  // to whatever is being typed.
+  if (a && a.id === "filter" && e.key === "Escape") {
+    a.value = ""; setFilter(""); a.blur(); e.preventDefault(); return;
+  }
   if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "Escape" && FILTER) {
+    document.getElementById("filter").value = "";
+    setFilter("");
+    e.preventDefault();
+    return;
+  }
   if (e.key === "?") {
     const r = document.getElementById("ref");
     r.open = !r.open;
