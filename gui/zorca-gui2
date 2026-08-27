@@ -57,6 +57,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
          "stuck_candidates": 0, "stuck_observed": 0,
          "task_counts": {}, "resolved_count": 0,
+         "timings": {}, "refresh_secs": 0,
          "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
@@ -880,31 +881,67 @@ def current_run():
     return ""
 
 
+class Stages(object):
+    """Wall-clock per stage of a refresh, so tuning aims at the slow half.
+
+    Kept in the payload rather than a log line: a number you have to go
+    looking for is a number nobody looks at, and this one decides what is
+    worth optimising.
+    """
+
+    def __init__(self):
+        self.t = {}
+
+    def time(self, name):
+        outer = self
+
+        class _T(object):
+            def __enter__(self):
+                self.t0 = time.time()
+                return self
+
+            def __exit__(self, *a):
+                outer.t[name] = round(time.time() - self.t0, 2)
+                return False
+        return _T()
+
+
 def refresh():
+    st = Stages()
     # No bare except here: if orca-board is gone or its JSON is garbage the
     # board is blind, and a blind board must say so (SPEC 2).
-    board = json.loads(sh(["python3", BOARD, "--json"], timeout=120,
-                          strict=True) or "[]")
-    run_id = current_run()
-    gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
-    for g in gates:
-        try:
-            g["options"] = json.loads(g.get("options") or "[]")
-        except Exception:
-            g["options"] = []
-    runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
+    with st.time("board"):
+        board = json.loads(sh(["python3", BOARD, "--json"], timeout=120,
+                              strict=True) or "[]")
+    with st.time("run"):
+        run_id = current_run()
+    with st.time("gates"):
+        gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
+        for g in gates:
+            try:
+                g["options"] = json.loads(g.get("options") or "[]")
+            except Exception:
+                g["options"] = []
+        runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
     pending = [g for g in gates if g.get("status") == "pending"]
     resolved = [g for g in gates if g.get("status") != "pending"]
-    w_alive, w_ts = watcher()
-    gits = git_scan([p.get("cwd") for p in board])
-    gitmap = {g["cwd"]: g for g in gits}
+    with st.time("watcher"):
+        w_alive, w_ts = watcher()
+    with st.time("git_scan"):
+        gits = git_scan([p.get("cwd") for p in board])
+        gitmap = {g["cwd"]: g for g in gits}
     claims = claims_update(board)
     stuck, stuck_candidates, stuck_observed = stuck_lanes(board, gitmap, claims)
-    orphans, orphan_total = inflight_orphans(board)
-    estate = estate_sweep([p.get("cwd") for p in board])
-    dage = drafts_age()
-    grill = grill_state()
-    tasks_now = load_tasks(run_id)
+    with st.time("orphans"):
+        orphans, orphan_total = inflight_orphans(board)
+    with st.time("estate"):
+        estate = estate_sweep([p.get("cwd") for p in board])
+    with st.time("drafts"):
+        dage = drafts_age()
+    with st.time("grill"):
+        grill = grill_state()
+    with st.time("tasks"):
+        tasks_now = load_tasks(run_id)
     # The strip needs the counts on every poll; the fold needs the rows only
     # when it opens. Counting here keeps the lean payload two small numbers.
     counts = {}
@@ -912,13 +949,15 @@ def refresh():
         k = t.get("status") or "?"
         counts[k] = counts.get(k, 0) + 1
     trend = trend_record(trend_values(board, tasks_now, estate, dage, grill))
-    daily = daily_events()
+    with st.time("daily"):
+        daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=tasks_now,
                      task_counts=counts, resolved_count=len(resolved),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
+                     timings=st.t, refresh_secs=round(sum(st.t.values()), 1),
                      daily=daily, gitlog=gits[:12], stuck=stuck,
                      stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
                      orphans=orphans, orphan_total=orphan_total, estate=estate,
@@ -1302,6 +1341,8 @@ button.mini.ack:hover { color:var(--gold); }
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
    <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
+   <h2>What the refresh costs</h2>
+   <div class="card jamsrc" id="refreshcost" style="opacity:1"></div>
    <h2>Where these numbers live</h2>
    <div class="card jamsrc" id="provenance" style="opacity:1"></div>
   </div>
@@ -2009,6 +2050,7 @@ function unmeasured(){
   say("wallsummary", "not measured yet");
   say("stuckcount", "not measured yet");
   say("orphcount", "not measured yet");
+  say("refreshcost", "no refresh has completed yet");
   document.getElementById("needbtn").classList.remove("clear");
   document.getElementById("needsyou").classList.remove("clear");
   document.getElementById("stuck").classList.remove("clear");
@@ -2077,6 +2119,16 @@ async function load(){
            + `default branch - counted, not assumed level</div>` : "")
       + (e.ahead_repos > (e.ahead || []).length
          ? `<div class="stamp">${e.ahead_repos - e.ahead.length} more not listed</div>` : "");
+  // What the refresh actually costs, visible rather than assumed. This
+  // number is why cycle 15 did NOT parallelise the git work: the pane
+  // scrape is two thirds of it and the git stages are a fifth.
+  const T = s.timings || {};
+  const order = Object.keys(T).sort((a, b) => T[b] - T[a]);
+  document.getElementById("refreshcost").innerHTML = order.length
+    ? `last refresh <b>${s.refresh_secs}s</b> &middot; ` +
+      order.filter(k => T[k] > 0).map(k => `${esc(k)} ${T[k]}s`).join(" &middot; ") +
+      ` &middot; loop ticks every 20s`
+    : "not measured yet";
   document.getElementById("provenance").innerHTML = [
     ["lanes, ctx critical, the wall",
      "python3 ~/bin/orca-board --json - one scrape per refresh, ~1s per pane"],
