@@ -932,6 +932,19 @@ def refresh():
         gitmap = {g["cwd"]: g for g in gits}
     claims = claims_update(board)
     stuck, stuck_candidates, stuck_observed = stuck_lanes(board, gitmap, claims)
+    # Attach the work each pane has actually done. Both numbers are already
+    # computed for the stuck surface and the estate sweep; the wall was the
+    # one place showing pane text without them, so a lane that had committed
+    # nothing for a day looked identical to one that had just landed.
+    _now = time.time()
+    for p in board:
+        g = gitmap.get(p.get("cwd") or "")
+        p["last_ts"] = g["ts"] if g else None
+        p["last_sha"] = g["sha"] if g else ""
+        p["last_text"] = g["text"] if g else ""
+        c = claims.get(p.get("handle")) or {}
+        p["held"] = int(_now - c["since"]) if c.get("since") else None
+        p["held_assumed"] = bool(c.get("assumed"))
     with st.time("orphans"):
         orphans, orphan_total = inflight_orphans(board)
     with st.time("estate"):
@@ -1203,6 +1216,11 @@ input[type=text] { width:58%; cursor:text; }
 .ctx.hot { color:var(--warn); }
 .detail { color:var(--dim); font-size:13px; overflow:hidden;
           text-overflow:ellipsis; white-space:nowrap; }
+.worked { flex:1 1 100%; font-size:12px; margin-top:4px; min-width:0;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.worked .none { color:var(--dim); opacity:.8; }
+.worked .good { color:var(--ok); }
+.worked .flag { color:var(--gold); }
 #wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
 #wallsummary .idle { color:var(--gold); }
 
@@ -1952,6 +1970,19 @@ function strip(s){
   cells.forEach(c => (c[4] || []).forEach(a => {
     if (a) notable.push(`<span class="${a[0]}">${esc(a[1])}</span>`);
   }));
+  // The refresh-cost tripwire, with the thresholds named rather than left
+  // to judgement. The loop ticks every 20s, so a refresh past 10s means the
+  // board is scraping more than half the time and the cycle has started to
+  // matter - which it does not today at 4.1s. 5s for a single stage names
+  // the culprit rather than just the total. Measured 2026-08-26: board
+  // 2.87s, estate 0.76s, everything else under 0.25s.
+  const T = s.timings || {};
+  if (s.refresh_secs > 10) {
+    notable.push(`<span class="bad">refresh ${s.refresh_secs}s (over 10s)</span>`);
+  }
+  Object.keys(T).filter(k => T[k] > 5).forEach(k => {
+    notable.push(`<span class="bad">${esc(k)} stage ${T[k]}s (over 5s)</span>`);
+  });
   document.getElementById("stripsummary").innerHTML = notable.length
     ? notable.join(" &middot; ")
     : `<span class="ok">nothing wrong in ${cells.length} readings</span>`;
@@ -2019,9 +2050,31 @@ function freshness(s){
   document.getElementById("head").classList.toggle("warn", cls === "stale");
 }
 
+/* What a lane has DONE, beside what it is saying. `held` comes from zorca
+   watching the state change, so a pane first seen already in this state
+   reports "at least" rather than a duration nobody measured - same rule as
+   the stuck surface. */
+function workLine(p){
+  const bits = [];
+  if (p.held != null) {
+    bits.push(`<span class="none">${p.held_assumed ? "at least " : ""}` +
+              `${ago(p.held)} in this state</span>`);
+  }
+  if (p.last_ts) {
+    const age = Date.now()/1000 - p.last_ts;
+    const cls = age > 6*3600 ? "flag" : "good";
+    bits.push(`<span class="${cls}">landed ${ago(age)} ago</span> ` +
+              `<span class="none">${esc(p.last_sha)} ${esc((p.last_text || "").slice(0, 46))}</span>`);
+  } else if (p.cwd_missing !== undefined || p.last_sha === "") {
+    bits.push(`<span class="none">no commit readable in this worktree</span>`);
+  }
+  return bits.length
+    ? `<div class="worked">${bits.join(" &middot; ")}</div>` : "";
+}
+
 /* A pane row. The state string is always rendered as text - the chip colour
    is the redundant channel, never the only one. */
-function paneRow(p, dup){
+function paneRow(p, dup, showWork){
   const hot = p.ctx != null && p.ctx >= 85;
   const ctx = p.ctx == null ? "-"
             : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
@@ -2030,6 +2083,7 @@ function paneRow(p, dup){
       <span class="chip r${p.rank}">${esc(p.state)}</span>
       <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
       <span class="detail">${esc(p.question || p.tail || "")}</span>
+      ${showWork ? workLine(p) : ""}
     </div>`;
 }
 
@@ -2098,7 +2152,7 @@ async function load(){
     `${working} working &middot; ${free} free &middot; ` +
     `<span class="${idle ? "idle" : ""}">${idle} idle</span>`;
   document.getElementById("panes").innerHTML =
-    live.map(p => paneRow(p, p.rank <= 2)).join("")
+    live.map(p => paneRow(p, p.rank <= 2, true)).join("")
     || '<div class="card">no live panes</div>';
   const e = s.estate;
   document.getElementById("aheadlist").innerHTML = !e
@@ -2127,7 +2181,9 @@ async function load(){
   document.getElementById("refreshcost").innerHTML = order.length
     ? `last refresh <b>${s.refresh_secs}s</b> &middot; ` +
       order.filter(k => T[k] > 0).map(k => `${esc(k)} ${T[k]}s`).join(" &middot; ") +
-      ` &middot; loop ticks every 20s`
+      ` &middot; loop ticks every 20s` +
+      ` &middot; <span class="none">tripwire: total over 10s, or any stage over 5s,` +
+      ` raises an alert in the fleet line</span>`
     : "not measured yet";
   document.getElementById("provenance").innerHTML = [
     ["lanes, ctx critical, the wall",
