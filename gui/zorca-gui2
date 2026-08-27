@@ -444,7 +444,8 @@ def stuck_lanes(board, gitmap, claims, now=None):
             continue
         if last["ts"] > since:
             continue
-        out.append(dict(repo=p.get("repo") or "?", handle=p.get("handle"),
+        out.append(dict(repo=p.get("label") or p.get("repo") or "?",
+                        handle=p.get("handle"),
                         key="stuck:%s:%d" % (p.get("handle"), int(since)),
                         state=p.get("state"), held=int(held),
                         assumed=bool(c.get("assumed")),
@@ -472,6 +473,31 @@ def stuck_lanes(board, gitmap, claims, now=None):
 INFLIGHT = os.environ.get(
     "ZORCA_INFLIGHT",
     os.path.expanduser("~/zao-vault/handoffs/IN-FLIGHT.md"))
+
+
+def pane_label(p):
+    """What to call a lane on screen.
+
+    orca-board emits BOTH `repo` (the worktree basename) and `title` (the
+    pane's own name), and this file rendered repo and ignored title. Where
+    four panes share one checkout that reads "ZAO OS V1" four times, which
+    defeats the whole point of naming them - the real titles are "ZID
+    assignment collision scanning", "ZAO brand tokens redesign spec", "ZOE
+    send budget gate" and "Zoe-loop orchestrator integration".
+
+    The field audit flagged panes[].title as unread back in cycle 13 and it
+    was filed as server-only rather than questioned. The audit was right and
+    the triage was wrong.
+
+    Orca decorates its titles with a leading status glyph and a trailing
+    connection note; both are stripped, since the state chip already carries
+    status and host=local is not news.
+    """
+    t = (p.get("title") or "").strip()
+    t = re.sub(r"^[^0-9A-Za-z(\[]+", "", t)
+    t = re.sub(r"\s+connected\s+host=\S+\s*$", "", t)
+    t = t.strip()
+    return t
 
 
 def _norm(v):
@@ -1126,6 +1152,8 @@ def refresh():
     # nothing for a day looked identical to one that had just landed.
     _now = time.time()
     for p in board:
+        # One derivation, so every surface calls a lane the same thing.
+        p["label"] = pane_label(p) or p.get("repo") or "(unnamed lane)"
         g = gitmap.get(p.get("cwd") or "")
         p["last_ts"] = g["ts"] if g else None
         p["last_sha"] = g["sha"] if g else ""
@@ -1404,6 +1432,7 @@ input[type=text] { width:58%; cursor:text; }
 .pane { display:flex; gap:12px; align-items:baseline; padding:9px 14px; }
 .pane:hover .repo { color:var(--gold); }
 .repo { min-width:170px; font-weight:600; }
+.inrepo { font-weight:400; color:var(--dim); font-size:12px; }
 .chip { display:inline-block; min-width:118px; padding:1px 8px;
         border-radius:5px; border-left:3px solid var(--line);
         background:transparent; font-size:13px; color:var(--dim); }
@@ -1731,7 +1760,10 @@ function renderFeed(s){
   const phone = window.innerWidth <= 900;
   const el = document.getElementById("since");
   if (el.dataset.userset !== "1") el.open = !phone;
-  const show = all.slice(0, 5);
+  // Four, not five. Pane titles are longer than repo basenames, which
+  // wrapped the action rows and pushed the first one to 919px against a
+  // 900px laptop fold. The feed is context; the decisions are the point.
+  const show = all.slice(0, 4);
   document.getElementById("feed").innerHTML = show.map(r => {
     const isNew = r.ts && r.ts > mark;
     const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
@@ -1764,12 +1796,18 @@ function parseTs(v){
    blocked, and an unknown age sorts last rather than pretending to be new. */
 function actions(s){
   const out = [];
+  // A queued draft carries the pane's repo, which is empty for a lane with
+  // no worktree - one row rendered with no name at all. The pane knows.
+  const byHandle = {};
+  (s.panes || []).forEach(p => { if (p.handle) byHandle[p.handle] = p.label; });
+  const laneName = (repo, handle) =>
+    (repo && repo.trim()) || byHandle[handle] || "(unnamed lane)";
   (s.drafts || []).forEach(d => {
     const hit = danger((d.reason || "") + " " + (d.text || ""));
     out.push({
       tier: hit ? 0 : 3,
       tag: hit ? "IRREVERSIBLE" : "SEND",
-      who: d.repo,
+      who: laneName(d.repo, d.handle),
       why: hit ? "danger word: " + hit : (d.reason || "queued draft"),
       ts: d.ts || 0,
       text: d.text || "",
@@ -1779,7 +1817,7 @@ function actions(s){
   });
   (s.panes || []).filter(p => p.rank === 0).forEach(p => {
     out.push({
-      tier: 1, tag: "CONTEXT", who: p.repo,
+      tier: 1, tag: "CONTEXT", who: p.label || p.repo,
       why: p.ctx == null ? "context critical" : p.ctx + "% - hand off now",
       ts: 0, text: p.question || p.tail || "",
       buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
@@ -1808,7 +1846,7 @@ function actions(s){
   });
   (s.panes || []).filter(p => p.rank === 1 || p.rank === 2).forEach(p => {
     out.push({
-      tier: 4, tag: "ASKED", who: p.repo, why: esc(p.state),
+      tier: 4, tag: "ASKED", who: p.label || p.repo, why: esc(p.state),
       ts: 0, text: p.question || p.tail || "",
       buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
     });
@@ -2340,8 +2378,11 @@ function paneRow(p, dup, showWork){
   const hot = p.ctx != null && p.ctx >= 85;
   const ctx = p.ctx == null ? "-"
             : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
+  const label = p.label || p.repo || "(unnamed lane)";
+  const sub = (p.repo && p.repo !== label) ? p.repo : "";
   return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>
-      <span class="repo">${esc(p.repo)}</span>
+      <span class="repo">${esc(label)}${sub
+        ? `<span class="inrepo"> ${esc(sub)}</span>` : ""}</span>
       <span class="chip r${p.rank}">${esc(p.state)}</span>
       <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
       <span class="detail">${esc(p.question || p.tail || "")}</span>
@@ -2443,8 +2484,8 @@ function render(s){
   /* --- rail 2: the wall. Free and finished lanes collapse into the
          summary; a card here means a lane that is actually running. --- */
   const liveAll = s.panes.filter(p => p.rank <= 4);
-  const live = liveAll.filter(p => hit(p.repo, p.state, p.tail, p.question,
-                                       p.last_text, p.cwd));
+  const live = liveAll.filter(p => hit(p.repo, p.label, p.state, p.tail,
+                                       p.question, p.last_text, p.cwd));
   const working = s.panes.filter(p => p.rank == 3 || p.rank == 4).length;
   const free = s.panes.filter(p => p.rank == 6).length;
   const idle = s.panes.filter(p => p.rank == 5).length;
@@ -2492,7 +2533,7 @@ function render(s){
        ? undeclared.map(p => `
           <div class="task">
             <span class="chip r${p.rank}">${esc(p.state)}</span>
-            <span>${esc(p.repo || "(no repo name)")}</span>
+            <span>${esc(p.label || p.repo || "(unnamed lane)")}</span>
             <span class="stamp">${p.held != null
               ? (p.held_assumed ? "at least " : "") + ago(p.held) + " in this state"
               : "state age unknown"}${p.last_ts
