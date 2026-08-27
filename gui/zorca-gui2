@@ -1142,6 +1142,13 @@ function esc(s){ const d=document.createElement("div"); d.textContent=s||""; ret
    paths come from disk; either can contain an apostrophe, and one would end
    the attribute early. */
 function attr(s){ return esc(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;"); }
+/* A JS value safe to drop inside a single-quoted onclick. JSON.stringify
+   alone is not enough: it escapes double quotes and leaves apostrophes
+   alone, so a gate option reading "don't merge" ends the attribute and the
+   rest of the option becomes markup. Every interpolated value goes through
+   this - ids, handles and free text alike - because "this one is a UUID"
+   stops being true the day something upstream changes format. */
+function js(v){ return attr(JSON.stringify(v)); }
 
 /* ZORCA already holds danger-worded drafts on rail 1. The GUI was the one
    surface where that hold was invisible - this only renders it. No override
@@ -1244,8 +1251,8 @@ function actions(s){
       why: hit ? "danger word: " + hit : (d.reason || "queued draft"),
       ts: d.ts || 0,
       text: d.text || "",
-      buttons: `<button onclick='sendDraft("${d.id}", this, ${hit ? "true" : "false"})'>Send</button>
-        <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>`
+      buttons: `<button onclick='sendDraft(${js(d.id)}, this, ${hit ? "true" : "false"})'>Send</button>
+        <button onclick='post("/api/draft",{id:${js(d.id)},action:"skip"}, this)'>Skip</button>`
     });
   });
   (s.panes || []).filter(p => p.rank === 0).forEach(p => {
@@ -1253,30 +1260,35 @@ function actions(s){
       tier: 1, tag: "CONTEXT", who: p.repo,
       why: p.ctx == null ? "context critical" : p.ctx + "% - hand off now",
       ts: 0, text: p.question || p.tail || "",
-      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+      buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
     });
   });
-  (s.gates || []).forEach(g => {
+  (s.gates || []).forEach((g, gi) => {
+    // The input's id is built from the loop index, not the gate id. An id
+    // has to survive being written into an attribute AND read back through
+    // getElementById inside another attribute, and the only value that
+    // reliably does that is one we chose ourselves.
+    const inputId = "gate-answer-" + gi;
     const opts = (g.options || []).map(o =>
-      `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("");
+      `<button onclick='post("/api/resolve",{id:${js(g.id)},resolution:${js(o)}}, this)'>${esc(o)}</button>`).join("");
     const close = (g.options || []).length === 0
-      ? `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."}, this)'>close - addressed</button>`
+      ? `<button onclick='post("/api/resolve",{id:${js(g.id)},resolution:${js("Closed by Zaal from ZORCA GUI: addressed, no further action.")}}, this)'>close - addressed</button>`
       : "";
     out.push({
       tier: 2, tag: "BLOCKED", who: "decision gate",
       why: "a lane is waiting on your call",
       ts: parseTs(g.created_at), text: g.question || "",
       buttons: opts + close +
-        `<input type="text" id="in-${g.id}" placeholder="or type an answer">
-         <button onclick='post("/api/resolve",{id:"${g.id}",
-           resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>`
+        `<input type="text" id="${inputId}" placeholder="or type an answer">
+         <button onclick='post("/api/resolve",{id:${js(g.id)},
+           resolution:document.getElementById(${js(inputId)}).value}, this)'>send</button>`
     });
   });
   (s.panes || []).filter(p => p.rank === 1 || p.rank === 2).forEach(p => {
     out.push({
       tier: 4, tag: "ASKED", who: p.repo, why: esc(p.state),
       ts: 0, text: p.question || p.tail || "",
-      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+      buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
     });
   });
   const LAST = 1e18;
@@ -1357,7 +1369,7 @@ function renderStuck(s){
         &middot; ${esc(r.last_sha)} ${esc(r.last_text)}</div>
       <span class="jamsrc">${esc(r.src)}${r.assumed
         ? " - first seen already in this state, so the real duration may be longer" : ""}</span>
-      <div><button class="mini" onclick='post("/api/focus",{handle:"${r.handle}"}, this)'
+      <div><button class="mini" onclick='post("/api/focus",{handle:${js(r.handle)}}, this)'
         >open the pane</button></div>
       ${ackBar(s, r.key)}
     </div>`).join("");
@@ -1657,7 +1669,7 @@ function paneRow(p, dup){
   const hot = p.ctx != null && p.ctx >= 85;
   const ctx = p.ctx == null ? "-"
             : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
-  return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
+  return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>
       <span class="repo">${esc(p.repo)}</span>
       <span class="chip r${p.rank}">${esc(p.state)}</span>
       <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
@@ -1784,7 +1796,7 @@ async function load(){
   /* --- rail 3: reference ------------------------------------------- */
   document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
     <div class="task" style="cursor:pointer" onclick='
-      const el=document.getElementById("spec-"+${i});
+      const el=document.getElementById("spec-"+${Number(i)});
       el.style.display = el.style.display=="none" ? "block" : "none";'>
       <span class="st st-${t.status}">${t.status}</span>
       <span>${esc(t.title)}</span></div>
@@ -1798,7 +1810,7 @@ async function load(){
     </div>`).join("") || '<span class="stamp">none yet</span>';
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
     <div class="task"><button class="mini"
-      onclick='post("/api/lane",{i:${i}}, this)'>open</button>
+      onclick='post("/api/lane",{i:${Number(i)}}, this)'>open</button>
       <span>${esc(l.name)}</span>
       <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
