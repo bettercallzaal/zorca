@@ -1,8 +1,28 @@
 # DRAFT - not placed. See README.md in this directory.
+
+# ---------------------------------------------------------------------------
+# OPEN 1: does this flip to false when the templates go live?
 #
-# blank_issues_enabled: forcing every reporter through a template tends to
-# turn away the one-line report that was worth having on a small public repo.
-# Left true. Zaal's call.
+# Left TRUE. Forcing every reporter through a form on a small public repo
+# tends to turn away the one-line report that was worth having.
+#
+# The real cost of leaving it true, stated honestly: templates only shape
+# behaviour when they are the only path. With blank issues enabled, most
+# people click "blank", which means safety_rail.md - the template that earns
+# its place here - is the one most likely never to be used. A rail regression
+# reported as a blank two-line issue loses exactly the fields that make it
+# actionable: failed-open vs failed-shut, and whether anything irreversible
+# happened.
+#
+# Decide it with evidence rather than taste. If after a stretch of real
+# issues safety_rail has zero uses while rail problems are arriving as blank
+# issues, flip it. That is measurable; guessing now is not.
+#
+# COUPLING - do not flip this in isolation. Setting false while the contact
+# link below is commented out leaves a reporter with a security concern no
+# route at all: no blank issue, no template that fits, no private channel.
+# Order is: enable private reporting -> uncomment the link -> only then
+# consider false. Never false while the link is dead.
 blank_issues_enabled: true
 
 # ---------------------------------------------------------------------------
@@ -26,4 +46,34 @@ blank_issues_enabled: true
 #   - name: Security or disclosure concern
 #     url: https://github.com/bettercallzaal/zorca/security/advisories/new
 #     about: Do not open a public issue for anything involving credentials, hostnames, or private data. Report it privately here.
+#
 # ---------------------------------------------------------------------------
+# OPEN 2: a security report arrives while private reporting is still off.
+#
+# It will arrive as a public issue, or by DM, or by mail - because there is
+# currently nowhere else for it to go. Assume it happens.
+#
+# 1. If it is already public, IT IS ALREADY PUBLISHED. Deleting the issue
+#    does not unpublish it: it is in notifications, in mail, in anyone's
+#    open tab, possibly in a fork. Deletion destroys the record while the
+#    disclosure survives, which is strictly worse. Deletion on a public repo
+#    is Zaal's call and never an agent's - the same rule that governs every
+#    other irreversible here.
+#
+# 2. Acknowledge fast, and do NOT restate the detail. Describing precisely
+#    what is vulnerable, or what would be redacted, republishes it - the one
+#    way a redaction pass makes things worse. "Received, moving this to a
+#    private channel" is the whole acknowledgment.
+#
+# 3. Enable private reporting THEN, not later. It costs one command and it
+#    is what stops the next person having the same non-choice. Fixing the
+#    channel is separate from fixing the bug and should not wait on it.
+#
+# 4. Fix forward. History retains what was published; the repo can only
+#    stop repeating it.
+#
+# 5. Note for whoever handles it: push protection and secret scanning are
+#    enabled here, so a credential in a PUSH is blocked at the remote. It is
+#    NOT verified whether that covers a credential pasted into an issue body
+#    or comment - do not assume it does. Treat a pasted credential as live
+#    and rotate it.
