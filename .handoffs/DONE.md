@@ -97,3 +97,37 @@ two things it named. Please re-send the head.
 - 2026-08-27 cycle 20 - :7778 "Lanes running undeclared" list in the fold. Cycle 19 counted 13 live lanes with no IN-FLIGHT row; this says WHICH, with state, how long in that state, and last-commit age - enough to identify a lane and decide whether it is worth a row. Derived entirely from panes already in the payload, so it costs zero extra bytes on the poll; the list count is asserted against the server's independent count (13 vs 13). Rank 5-6 excluded - a bare shell is not an undeclared lane. Three empty/edge states each say something different: "every live lane has an IN-FLIGHT row" when there are none, "not measured yet" before the first scrape, and - the one that matters - "cannot tell - IN-FLIGHT.md could not be read this refresh, so every lane would look undeclared" when the file is unreadable, because listing all 21 there would be the dashboard inventing a problem out of its own blindness. The surface reports only; per the relay it does not edit IN-FLIGHT.md, and the footer says writing the rows is a human's call. Stale-row cleanup left for a later cycle. Field audit passes, above the fold at all five widths. Screenshot `/tmp/zorca-7778-undeclared.png`. File `gui/zorca-gui2`.
 - 2026-08-27 cycle 21 - :7778 stale IN-FLIGHT rows, proposed not applied. `~/zao-vault/handoffs/IN-FLIGHT.md` backed up first to `~/.zao/archive/inflight-20260827-045902/` and verified byte-identical afterwards - the dashboard does not write that file and the proposal's own header says so. Threshold 3 days (env `ZORCA_ARCHIVE_AFTER_D`): a row at 0-2 days is very likely a lane between reboots, while 3 days with no live pane, across a period when twenty other lanes ran, is a row describing work that stopped. Live: 34 rows across 20 lanes. Output is a paste-ready rewrite of the whole table with those rows MARKED - `| lane | ARCHIVED 2026-08-27 (no live lane for 9d): <original text> | ... |` - so applying it is one replace rather than twenty and nothing is deleted; each archived row keeps its lane, its text and its date. Header carries the source file's mtime and line count and says to reload if it has changed since. Correctness proven by applying the block to a COPY and re-parsing: 36 lanes before and after, no lane lost, orphan count and unmatched-pane count identical, live lane purposes unchanged, no archived lane has a live pane, and re-running the proposal over the proposed file marks 0 - so pasting it stops the surface nagging rather than re-proposing forever. Investigated one suspicious result rather than shipping it: a lane named `lanes` with 10 marked rows turned out to be a real session doing estate-wide audits, not a second table being mis-parsed. The 75 KB block rides the `detail=1` fetch and sits behind a disclosure, so the poll stays 44.6 KB and the DOM cost is opt-in. Field audit passes, above the fold at all five widths. Screenshot `/tmp/zorca-7778-archive.png`. File `gui/zorca-gui2`.
 
+
+---
+
+## Adoption candidates - 2026-08-27
+
+Read `~/zao-vault/notes/adoption-candidates.md` first (36 lines, 7 rows). Not
+editing it - vault is orchestrator-written.
+
+**Not re-proposed, already listed:** `99darwin/telecast`. Its row says
+`NONE - all rights reserved / blocked on license`, and I independently
+**confirm that from the file**: `gh api repos/99darwin/telecast/license`
+returns 404 and there is no LICENSE or COPYING at the repo root. `ZOE-CENTER.md`
+treats it as read-for-shape only and copies no code, which is consistent with
+that row - flagging the corroboration in case the row is still marked
+unverified.
+
+**Also already listed, and now load-bearing elsewhere:** `trycua/hermes-agent`
+sits as a watcher seed for the ZOE v2 runtime. That is the same runtime
+question costed in `docs/DESIGN-bridge.md` s12.4 - the two should be read
+together before cutover, since that section records three unresolved
+preconditions.
+
+New rows:
+
+| source repo | what | LICENSE from the file | adopt as | target repo | effort |
+|---|---|---|---|---|---|
+| ZAODEVZ/zabalgamez (branch `ws/bonfire-lane`, commit `fe384eb`) | `scripts/telegram-export-to-bonfire.mjs`, 370 lines - Telegram Desktop export to Bonfire episodes. Handles both export shapes (single-chat root, multi-chat `chats.list`), segments by quiet gap rather than per message, min-chars floor, `--since` / `--limit` / `--chat` / `--out`, **dry-run by default, posts only on explicit `--post`** | MIT (read from `LICENSE` at repo root: "MIT License, Copyright (c) 2026 BetterCallZaal / ZAO DEVZ"). Internal reuse, not third-party | files (vendor or merge - it is on an **unmerged branch**, so pick one deliberately rather than forking a third copy) | ZOE v2 (chat-export ingest slot, `ZOE-CENTER.md` s7) | M |
+| local skill `meeting` (`scripts/lane-weigh-in.py`, Phase 3.5) | Classify which lanes an input belongs to, send each a packet, bounded wait, collect, merge before fan-out. Carries hard-won refusals: bare shells, panes on pickers, ranking by pane title not repo match, clearing its own trust gate before counting a delivery | ours - skill, not a repo; no LICENSE file applies | pattern (generalise from meetings-only to any input; it is the reference implementation of the ask/weigh-in loop in `ZOE-CENTER.md` s3 and s9 step 5) | zorca (ask queue) | M |
+
+Caveat on both rows: they are **internal** reuse, not "code from others". If
+`adoption-candidates.md` is meant strictly for third-party code, drop them
+there and track them as ordinary build items instead - flagging rather than
+assuming, since the note's own header says "code from others worth pulling
+in" while the mandate said "anything adoptable".
