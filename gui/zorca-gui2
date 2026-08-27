@@ -77,7 +77,8 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
-         "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
+         "orphan_total": 0, "unmatched_panes": None, "inflight_rows": None,
+         "estate": None, "drafts_age": None, "trend": [],
          "stuck_candidates": 0, "stuck_observed": 0,
          "task_counts": {}, "resolved_count": 0,
          "timings": {}, "refresh_secs": 0, "problems": [],
@@ -494,6 +495,19 @@ def inflight_orphans(board, now=None, n=8):
     the kind that has been sitting longest.
     """
     now = now or time.time()
+    rows = inflight_rows()
+    if rows is None:
+        return [], 0, None
+    return _orphans_and_unmatched(board, rows, now, n)
+
+
+def inflight_rows():
+    """The newest IN-FLIGHT row per lane, or None if the file cannot be read.
+
+    None and [] are different answers: no rows means the map is empty, while
+    unreadable means we do not know - and both surfaces built on this have to
+    tell those apart rather than rendering "none" for either.
+    """
     rows = []
     try:
         for ln in open(INFLIGHT):
@@ -509,11 +523,8 @@ def inflight_orphans(board, now=None, n=8):
                 ts = 0
             rows.append(dict(lane=cells[0], doing=cells[1], when=cells[3], ts=ts))
     except Exception as e:
-        # Returning a bare [] here crashed the caller's tuple unpack and took
-        # the WHOLE refresh down - live since cycle 2, never hit because the
-        # file always existed. Found by the silent-failure sweep.
         problem("IN-FLIGHT.md", e)
-        return [], 0
+        return None
     solved("IN-FLIGHT.md")
     # One lane, many rows - the newest row is the lane's current claim.
     newest = {}
@@ -521,15 +532,53 @@ def inflight_orphans(board, now=None, n=8):
         cur = newest.get(r["lane"])
         if cur is None or r["ts"] > cur["ts"]:
             newest[r["lane"]] = r
-    live = [_norm(p.get("repo")) for p in board if p.get("repo")]
-    live += [_norm(os.path.basename(p.get("cwd") or "")) for p in board if p.get("cwd")]
-    live = [x for x in live if x]
+    return list(newest.values())
+
+
+def _lane_matches(lane, pane):
+    """Containment on the alphanumerics of both - the same rule the orphan
+    surface has always used, because `fractal` runs in `ZAOfractal` and
+    `meetings` in `zaomeetings`. Fuzzy on purpose, and said so on the page."""
+    a = _norm(lane)
+    if not a:
+        return False
+    for cand in (pane.get("repo"), os.path.basename(pane.get("cwd") or "")):
+        b = _norm(cand)
+        if b and (a in b or b in a):
+            return True
+    return False
+
+
+def _orphans_and_unmatched(board, rows, now, n):
+    """Both directions at once: what each lane is FOR, and what is unmatched.
+
+    A pane with no row is not a failure - a lane can start before anyone
+    writes it down - but it is a gap, and a gap nobody can see is the thing
+    this dashboard keeps turning out to be wrong about.
+    """
+    live = [p for p in board if (p.get("rank") or 0) <= 4]
+    unmatched_panes = 0
+    for p in board:
+        hit = None
+        for r in rows:
+            if _lane_matches(r["lane"], p):
+                hit = r
+                break
+        # Truncated here, not in the page. An IN-FLIGHT `doing` cell runs to
+        # several hundred characters and the wall renders 110 of them, so
+        # shipping the rest put 12 KB back onto every 15s poll that cycle 14
+        # had just taken off.
+        p["purpose"] = (hit["doing"][:130] if hit else "")
+        p["purpose_lane"] = (hit["lane"] if hit else "")
+        p["purpose_when"] = (hit["when"] if hit else "")
+        if not hit and p in live:
+            unmatched_panes += 1
+    newest = {r["lane"]: r for r in rows}
     out = []
     for r in newest.values():
-        lane = _norm(r["lane"])
-        if not lane:
+        if not _norm(r["lane"]):
             continue
-        if any(lane in x or x in lane for x in live):
+        if any(_lane_matches(r["lane"], p) for p in board):
             continue
         # A row that says the lane closed is an accurate record, not an
         # outliving claim. Counting it would make the surface cry wolf about
@@ -544,7 +593,7 @@ def inflight_orphans(board, now=None, n=8):
     # Oldest claim first - the longer a row outlives its lane, the more
     # confidently the next lane will believe it.
     out.sort(key=lambda r: (r["ts"] or 0))
-    return out[:n], len(out)
+    return out[:n], len(out), unmatched_panes
 
 
 ESTATE_NOTE = os.environ.get(
@@ -1020,7 +1069,8 @@ def refresh():
         p["held"] = int(_now - c["since"]) if c.get("since") else None
         p["held_assumed"] = bool(c.get("assumed"))
     with st.time("orphans"):
-        orphans, orphan_total = inflight_orphans(board)
+        orphans, orphan_total, unmatched_panes = inflight_orphans(board)
+        iflrows = inflight_rows()
     with st.time("estate"):
         estate = estate_sweep([p.get("cwd") for p in board])
     with st.time("drafts"):
@@ -1049,7 +1099,10 @@ def refresh():
                                for k, v in sorted(PROBLEMS.items())],
                      daily=daily, gitlog=gits[:12], stuck=stuck,
                      stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
-                     orphans=orphans, orphan_total=orphan_total, estate=estate,
+                     orphans=orphans, orphan_total=orphan_total,
+                     unmatched_panes=unmatched_panes,
+                     inflight_rows=(len(iflrows) if iflrows is not None else None),
+                     estate=estate,
                      drafts_age=dage, grill=grill, trend=trend, acks=acks_read(),
                      ack_stale_s=ACK_STALE_S,
                      run=runs[0][:120] if runs else "")
@@ -1301,6 +1354,8 @@ input[type=text] { width:58%; cursor:text; }
 .worked .none { color:var(--dim); opacity:.8; }
 .worked .good { color:var(--ok); }
 .worked .flag { color:var(--gold); }
+.worked .purpose { color:var(--text); }
+.worked { white-space:normal; }
 #wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
 #wallsummary .idle { color:var(--gold); }
 
@@ -2185,6 +2240,10 @@ function freshness(s){
    the stuck surface. */
 function workLine(p){
   const bits = [];
+  if (p.purpose) {
+    bits.push(`<span class="purpose">${esc(p.purpose.slice(0, 110))}</span>` +
+              `<span class="none"> (IN-FLIGHT ${esc(p.purpose_lane)}, ${esc(p.purpose_when)})</span>`);
+  }
   if (p.held != null) {
     bits.push(`<span class="none">${p.held_assumed ? "at least " : ""}` +
               `${ago(p.held)} in this state</span>`);
@@ -2367,12 +2426,34 @@ function render(s){
                      "last-look mark and every trend baseline cannot be kept",
                 ts: Date.now()/1000});
   }
-  document.getElementById("problems").innerHTML = probs.length
+  const failing = probs.length
     ? probs.map(pr => `<div style="margin-bottom:6px"><b class="bad">${esc(pr.where)}</b>` +
         ` <span class="none">since ${new Date(pr.ts*1000).toLocaleTimeString()}</span>` +
         `<br>${esc(pr.why)}</div>`).join("")
     : "nothing is failing quietly - every read and write this refresh " +
       "either succeeded or is named above";
+  // Unmatched lanes are a data gap, not a code failure, so they are reported
+  // here without being pushed into the fleet alert line - a channel that
+  // shouts about everything gets ignored like one that shouts about nothing.
+  // Both directions, because omitting either is the silent omission this
+  // block exists to end.
+  const unm = s.unmatched_panes, rowsN = s.inflight_rows;
+  const known = rowsN !== null && rowsN !== undefined
+    && unm !== null && unm !== undefined;
+  const matching = !known
+    ? `<b class="bad">IN-FLIGHT.md could not be read</b> - no lane purpose is ` +
+      `known, and the orphan list under Stuck is empty for that reason rather ` +
+      `than because there are none`
+    : `<b>${rowsN}</b> rows &middot; ` +
+      `<b class="${unm ? "flag" : "nil"}">${unm}</b> live lane${unm === 1 ? "" : "s"} ` +
+      `with no row - running without a stated purpose &middot; ` +
+      `<b class="${s.orphan_total ? "flag" : "nil"}">${s.orphan_total}</b> ` +
+      `row${s.orphan_total === 1 ? "" : "s"} with no live lane - listed under Stuck` +
+      `<br><span class="none">matched by containment on the alphanumerics of the ` +
+      `lane name and the repo or worktree name; fuzzy on purpose</span>`;
+  document.getElementById("problems").innerHTML = failing +
+    '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">' +
+    '<b>Lane purpose matching</b><br>' + matching + '</div>';
   const T = s.timings || {};
   const order = Object.keys(T).sort((a, b) => T[b] - T[a]);
   document.getElementById("refreshcost").innerHTML = order.length
