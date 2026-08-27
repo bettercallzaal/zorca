@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Env-overridable so the staleness path can be exercised without editing
@@ -1917,9 +1918,61 @@ load(); setInterval(load, 15000);
 </script></body></html>"""
 
 
+# Only these may appear as the Host or the Origin's hostname. Everything
+# else is either a cross-origin page in Zaal's browser or a DNS-rebind
+# pointing a hostile name at 127.0.0.1.
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def local_only(self):
+        """CORS blocks a cross-origin page from READING the reply. It does
+        not stop the request being SENT and acted on, and every /api POST
+        here acts on something - resolves a gate, sends a draft to a live
+        pane. So the request itself is refused, not just its response.
+
+        Three checks, because each covers a hole the others leave:
+          Host    - a DNS rebind resolves evil.example to 127.0.0.1 and the
+                    Origin then looks legitimate; the Host header does not.
+          Origin  - a browser always sends it on a cross-origin POST. It is
+                    absent for curl and for local scripts, and absence is
+                    allowed, because the attack this defends against is a
+                    page in a browser and that page cannot omit it.
+          Sec-Fetch-Site - belt to the Origin's braces where the browser
+                    sends it.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if host.startswith("["):
+            host = host.split("]")[0] + "]"
+        else:
+            host = host.rsplit(":", 1)[0] if ":" in host else host
+        if host not in LOCAL_HOSTS:
+            return False, "Host %r is not local" % host[:60]
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() != "null":
+            try:
+                hostname = urllib.parse.urlparse(origin).hostname or ""
+            except Exception:
+                hostname = ""
+            if hostname not in LOCAL_HOSTS:
+                return False, "Origin %r is cross-site" % origin[:60]
+        elif origin.lower() == "null":
+            # A sandboxed iframe or a data: URL. Nothing legitimate here
+            # sends that.
+            return False, "Origin null"
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "same-site", "none"):
+            return False, "Sec-Fetch-Site %r" % site[:40]
+        return True, ""
+
+    def guard(self):
+        ok, why = self.local_only()
+        if not ok:
+            self._send(403, json.dumps({"ok": False, "why": why}))
+        return ok
 
     def _send(self, code, body, ctype="application/json"):
         data = body if isinstance(body, bytes) else body.encode()
@@ -1930,6 +1983,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if not self.guard():
+            return
         if self.path == "/":
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/state":
@@ -1939,6 +1994,8 @@ class H(BaseHTTPRequestHandler):
             self._send(404, "{}")
 
     def do_POST(self):
+        if not self.guard():
+            return
         n = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(n) or "{}")
