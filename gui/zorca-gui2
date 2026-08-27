@@ -50,6 +50,29 @@ ACK_STALE_S = int(os.environ.get("ZORCA_ACK_STALE_S", str(7 * 86400)))
 # not theorised: three acks fired at once left one in the file.
 ACK_LOCK = threading.Lock()
 
+# Every subsystem that failed to read or write, and why.
+#
+# Three times this session the same shape has bitten: a layer failed,
+# swallowed it, and the board reported a confident zero. The refresher
+# (cycle 1), the cold start (cycle 12), the renderer (cycle 17). Rather than
+# wait for the fourth, every swallow site records here. Set on failure,
+# CLEARED on the next success, so a fixed problem stops shouting on its own.
+PROBLEMS = {}
+PROBLEMS_LOCK = threading.Lock()
+
+
+def problem(where, exc=None, why=""):
+    with PROBLEMS_LOCK:
+        PROBLEMS[where] = {
+            "why": why or ("%s: %s" % (type(exc).__name__, exc) if exc else "failed"),
+            "ts": time.time(),
+        }
+
+
+def solved(where):
+    with PROBLEMS_LOCK:
+        PROBLEMS.pop(where, None)
+
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
@@ -57,7 +80,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
          "stuck_candidates": 0, "stuck_observed": 0,
          "task_counts": {}, "resolved_count": 0,
-         "timings": {}, "refresh_secs": 0,
+         "timings": {}, "refresh_secs": 0, "problems": [],
          "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
@@ -75,7 +98,13 @@ def queue_read():
 
 def queue_drop(did):
     items = [i for i in queue_read() if i.get("id") != did]
-    json.dump(items, open(QUEUE, "w"), indent=1)
+    try:
+        json.dump(items, open(QUEUE, "w"), indent=1)
+        solved("draft queue")
+    except Exception as e:
+        # The draft was sent and could not be removed - it will be offered
+        # again, which is the one outcome worth shouting about.
+        problem("draft queue", e, why="draft sent but NOT removed from the queue: %s" % e)
 
 
 # A value that starts with a dash is parsed as a FLAG in the space form:
@@ -121,9 +150,15 @@ def sh(args, timeout=60, strict=False):
 
 def orca_json(*args):
     out = sh([ORCA] + list(args) + ["--json"], strict=True)
+    tag = "orca " + " ".join(args[:2])
     try:
-        return json.loads(out).get("result", {})
-    except Exception:
+        r = json.loads(out).get("result", {})
+        solved(tag)
+        return r
+    except Exception as e:
+        # An unparseable gate-list becomes zero gates, which the board reads
+        # as "nothing needs you" - the most consequential lie it can tell.
+        problem(tag, e)
         return {}
 
 
@@ -252,7 +287,11 @@ def daily_events(n=12):
     rows = []
     try:
         lines = open(path).read().splitlines()
-    except Exception:
+        solved("vault daily log")
+    except Exception as e:
+        # No file at all is normal early in a day; anything else is not.
+        if not isinstance(e, (FileNotFoundError, IsADirectoryError)):
+            problem("vault daily log", e)
         return []
     for i, ln in enumerate(lines):
         if not ln.startswith("## "):
@@ -336,7 +375,15 @@ def claims_update(board, now=None):
     now = now or time.time()
     try:
         old = json.load(open(CLAIMS))
-    except Exception:
+        if not isinstance(old, dict):
+            raise ValueError("claims file is not an object")
+        solved("claims history")
+    except FileNotFoundError:
+        old = {}
+    except Exception as e:
+        # Recovering by resetting is right; doing it quietly is not - every
+        # duration on the stuck surface just went back to zero.
+        problem("claims history", e, why="unreadable, every stuck duration reset: %s" % e)
         old = {}
     if not board:
         # A blank board is almost always a transient scrape failure, not
@@ -363,8 +410,11 @@ def claims_update(board, now=None):
         # every duration on the next read, which is worse than no file.
         json.dump(new, open(tmp, "w"), indent=1)
         os.replace(tmp, CLAIMS)
-    except Exception:
-        pass
+        solved("claims file")
+    except Exception as e:
+        # A claims file that will not write means every stuck duration
+        # silently resets on the next restart.
+        problem("claims file", e)
     return new
 
 
@@ -458,8 +508,13 @@ def inflight_orphans(board, now=None, n=8):
             except Exception:
                 ts = 0
             rows.append(dict(lane=cells[0], doing=cells[1], when=cells[3], ts=ts))
-    except Exception:
-        return []
+    except Exception as e:
+        # Returning a bare [] here crashed the caller's tuple unpack and took
+        # the WHOLE refresh down - live since cycle 2, never hit because the
+        # file always existed. Found by the silent-failure sweep.
+        problem("IN-FLIGHT.md", e)
+        return [], 0
+    solved("IN-FLIGHT.md")
     # One lane, many rows - the newest row is the lane's current claim.
     newest = {}
     for r in rows:
@@ -700,7 +755,11 @@ def trend_record(values, now=None):
         hist = json.load(open(TREND))
         if not isinstance(hist, list):
             raise ValueError("trend file is not a list")
-    except Exception:
+        solved("trend history")
+    except FileNotFoundError:
+        hist = []
+    except Exception as e:
+        problem("trend history", e, why="unreadable, trend baselines reset: %s" % e)
         hist = []
     hist = [h for h in hist if isinstance(h, dict) and h.get("ts")]
     if any(v is not None for v in values.values()):
@@ -731,8 +790,9 @@ def trend_record(values, now=None):
         os.makedirs(os.path.dirname(TREND), exist_ok=True)
         json.dump(out, open(tmp, "w"))
         os.replace(tmp, TREND)
-    except Exception:
-        pass
+        solved("trend file")
+    except Exception as e:
+        problem("trend file", e)
     return out
 
 
@@ -765,8 +825,14 @@ def trend_values(board, tasks, estate, dage, grill=None):
 def acks_read():
     try:
         d = json.load(open(ACKS))
-        return d if isinstance(d, dict) else {}
-    except Exception:
+        if not isinstance(d, dict):
+            raise ValueError("acks file is not an object")
+        solved("acks history")
+        return d
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        problem("acks history", e, why="unreadable, everything reads unacked: %s" % e)
         return {}
 
 
@@ -786,8 +852,10 @@ def acks_write(d):
         os.makedirs(os.path.dirname(ACKS), exist_ok=True)
         json.dump(d, open(tmp, "w"), indent=1)
         os.replace(tmp, ACKS)
-    except Exception:
-        pass
+        solved("acks file")
+    except Exception as e:
+        # The tap looked like it worked and the ack is not on disk.
+        problem("acks file", e)
     return d
 
 
@@ -868,8 +936,14 @@ def tail_log(n=14):
             f.seek(0, 2)
             f.seek(max(0, f.tell() - 8192))
             lines = f.read().decode(errors="replace").splitlines()
+        solved("watcher log")
         return [l for l in lines if l.strip()][-n:]
-    except Exception:
+    except Exception as e:
+        # A missing log is normal before the watcher first writes; an
+        # unreadable one means the trail below is empty for a reason the
+        # page would otherwise present as "watcher not running".
+        if not isinstance(e, FileNotFoundError):
+            problem("watcher log", e)
         return []
 
 
@@ -971,6 +1045,8 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      timings=st.t, refresh_secs=round(sum(st.t.values()), 1),
+                     problems=[dict(where=k, why=v["why"], ts=v["ts"])
+                               for k, v in sorted(PROBLEMS.items())],
                      daily=daily, gitlog=gits[:12], stuck=stuck,
                      stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
                      orphans=orphans, orphan_total=orphan_total, estate=estate,
@@ -1370,6 +1446,8 @@ button.mini.ack:hover { color:var(--gold); }
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
    <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
+   <h2>Failing quietly</h2>
+   <div class="card jamsrc" id="problems" style="opacity:1"></div>
    <h2>What the refresh costs</h2>
    <div class="card jamsrc" id="refreshcost" style="opacity:1"></div>
    <h2>Where these numbers live</h2>
@@ -1471,11 +1549,19 @@ function danger(reason){
    (private window, blocked site data) - a feed with no NEW marks is still a
    feed, so every access is guarded and failure is silent by design. */
 let SEEN = null;
+let STORAGE_ERR = "";
 function seenAt(){
   if (SEEN !== null) return SEEN;
   let prev = 0;
-  try { prev = Number(localStorage.getItem("zorca.seen")) || 0; } catch (e) {}
-  try { localStorage.setItem("zorca.seen", String(Math.floor(Date.now()/1000))); } catch (e) {}
+  try {
+    prev = Number(localStorage.getItem("zorca.seen")) || 0;
+    localStorage.setItem("zorca.seen", String(Math.floor(Date.now()/1000)));
+  } catch (e) {
+    // A private window or blocked site data. The feed still works; the NEW
+    // marks and every trend baseline silently do not, so say so rather than
+    // let "no baseline yet" look like a fresh install forever.
+    STORAGE_ERR = e && e.message ? e.message : "blocked";
+  }
   SEEN = prev;
   return SEEN;
 }
@@ -2013,6 +2099,12 @@ function strip(s){
   // matter - which it does not today at 4.1s. 5s for a single stage names
   // the culprit rather than just the total. Measured 2026-08-26: board
   // 2.87s, estate 0.76s, everything else under 0.25s.
+  (s.problems || []).forEach(pr => {
+    notable.push(`<span class="bad">${esc(pr.where)} failing</span>`);
+  });
+  if (STORAGE_ERR) {
+    notable.push(`<span class="bad">browser storage blocked</span>`);
+  }
   const T = s.timings || {};
   if (s.refresh_secs > 10) {
     notable.push(`<span class="bad">refresh ${s.refresh_secs}s (over 10s)</span>`);
@@ -2142,6 +2234,7 @@ function unmeasured(){
   say("stuckcount", "not measured yet");
   say("orphcount", "not measured yet");
   say("refreshcost", "no refresh has completed yet");
+  say("problems", "not measured yet");
   document.getElementById("needbtn").classList.remove("clear");
   document.getElementById("needsyou").classList.remove("clear");
   document.getElementById("stuck").classList.remove("clear");
@@ -2267,6 +2360,19 @@ function render(s){
   // What the refresh actually costs, visible rather than assumed. This
   // number is why cycle 15 did NOT parallelise the git work: the pane
   // scrape is two thirds of it and the git stages are a fifth.
+  const probs = (s.problems || []).slice();
+  if (STORAGE_ERR) {
+    probs.push({where: "browser storage",
+                why: "localStorage is blocked here (" + STORAGE_ERR + ") - the " +
+                     "last-look mark and every trend baseline cannot be kept",
+                ts: Date.now()/1000});
+  }
+  document.getElementById("problems").innerHTML = probs.length
+    ? probs.map(pr => `<div style="margin-bottom:6px"><b class="bad">${esc(pr.where)}</b>` +
+        ` <span class="none">since ${new Date(pr.ts*1000).toLocaleTimeString()}</span>` +
+        `<br>${esc(pr.why)}</div>`).join("")
+    : "nothing is failing quietly - every read and write this refresh " +
+      "either succeeded or is named above";
   const T = s.timings || {};
   const order = Object.keys(T).sort((a, b) => T[b] - T[a]);
   document.getElementById("refreshcost").innerHTML = order.length
