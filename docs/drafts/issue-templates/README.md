@@ -21,6 +21,20 @@ rm .github/ISSUE_TEMPLATE/README.md   # this file does not belong there
 `config.yml` sets `blank_issues_enabled` and is the one file that changes
 behaviour beyond offering a form - review it before placing.
 
+**Precondition, measured 2026-08-27:** private vulnerability reporting is
+**disabled** on this repo (`gh api repos/bettercallzaal/zorca/private-vulnerability-reporting`
+returns `{"enabled": false}`). The security contact link is therefore
+commented out in `config.yml` rather than shipped: with reporting disabled
+the advisory URL accepts nothing from outside the repo, and a template that
+says "do not file this publicly, use this instead" while handing the reporter
+a dead end is worse than offering no link - it pushes them to disclose in
+public or to drop it. Enabling it is a repo-settings change and Zaal's, not
+an agent's; the one-line command is in `config.yml`.
+
+Also measured the same day, and reassuring: secret scanning **and** push
+protection are enabled on this repo, so a credential in a push would be
+blocked at the remote rather than relying on review.
+
 ## The three, and why these three
 
 | File | For |

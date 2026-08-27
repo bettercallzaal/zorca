@@ -1,9 +1,29 @@
-# Placement note: this file changes behaviour, unlike the templates beside it.
-# blank_issues_enabled: false forces every reporter through a template.
-# Left TRUE in the draft - forcing templates on a small public repo tends to
-# turn away the one-line report that was worth having. Zaal's call.
+# DRAFT - not placed. See README.md in this directory.
+#
+# blank_issues_enabled: forcing every reporter through a template tends to
+# turn away the one-line report that was worth having on a small public repo.
+# Left true. Zaal's call.
 blank_issues_enabled: true
-contact_links:
-  - name: Security or disclosure concern
-    url: https://github.com/bettercallzaal/zorca/security/advisories/new
-    about: Do not open a public issue for anything involving credentials, hostnames, or private data. Report it privately here.
+
+# ---------------------------------------------------------------------------
+# PRECONDITION before placing, measured 2026-08-27:
+#
+#   gh api repos/bettercallzaal/zorca/private-vulnerability-reporting
+#   -> {"enabled": false}
+#
+# The security contact link below is COMMENTED OUT on purpose. With private
+# reporting disabled, /security/advisories/new does not accept a report from
+# anyone outside the repo, so the link is a dead end. A template that says
+# "do not file this publicly, use this instead" and then hands the reporter
+# nothing is worse than offering no link at all: it pushes them toward
+# disclosing in public anyway, or toward dropping it.
+#
+# To enable it (Zaal, repo settings - not an agent's change):
+#   gh api -X PUT repos/bettercallzaal/zorca/private-vulnerability-reporting
+# then uncomment the block below and place the templates.
+#
+# contact_links:
+#   - name: Security or disclosure concern
+#     url: https://github.com/bettercallzaal/zorca/security/advisories/new
+#     about: Do not open a public issue for anything involving credentials, hostnames, or private data. Report it privately here.
+# ---------------------------------------------------------------------------

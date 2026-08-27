@@ -856,6 +856,22 @@ Two things worth knowing without reading them:
 That last choice is generic hygiene and **does not depend on open question
 7**. Nothing in the templates restates or resolves that field.
 
+**Self-scan of the drafts, 2026-08-27.** No host, path, token, email, IP or
+username appears in any of them; the only URL was the repo's own advisory
+endpoint. That endpoint turned out to be a **dead link**: private
+vulnerability reporting is disabled here
+(`gh api repos/bettercallzaal/zorca/private-vulnerability-reporting` ->
+`{"enabled": false}`), so it accepts nothing from outside the repo. The
+contact link is now commented out rather than shipped - a template that says
+"do not file this publicly, use this instead" and then hands the reporter
+nothing is worse than offering no link, because it pushes them to disclose in
+public or to drop it. Enabling reporting is a repo-settings change and
+Zaal's; the command is in `config.yml`.
+
+Reassuring, measured the same pass: **secret scanning and push protection are
+both enabled** on this repo, so a credential in a push is blocked at the
+remote rather than depending on someone noticing.
+
 ### Untouched, on instruction - do not assume otherwise
 
 `zorca-gui2` and its files. `bin/zorca`. The delete call. Issue template
