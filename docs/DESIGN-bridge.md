@@ -828,6 +828,40 @@ moment they publish a pricing page. If Zaal reads it as commercially
 uninteresting, the cost of leaving it is close to zero. That is his call to
 make, not this lane's to pre-empt.
 
+#### Options, and this lane's recommendation - still undecided
+
+Written out so the decision is a choice between costed paths rather than a
+yes/no. Values are described, never restated, for the reason given above.
+
+| # | Option | Cost | What it buys |
+|---|---|---|---|
+| 1 | **Leave as-is** | The figures keep being published on a public repo every time someone reads 12.4. | Nothing to do. Defensible if the terms are commercially uninteresting - see the counter-argument above. |
+| 2 | **Redact forward** - replace the two quantities with a qualitative statement (metered per compute-hour; balance small relative to continuous uptime) | Ten minutes. History still carries them. | The runway argument in 12.4 survives intact - it never needed the exact numbers, only their ratio - and the repo stops repeating them. |
+| 3 | **Redact + rewrite history** (force-push) | High. This branch is shared: other lanes commit and push to `main`, so a rewrite lands on their work too. Force-push is a gated irreversible. The values are likely already mirrored in clones and caches. | Very little that 2 does not, because the disclosure event already happened. |
+| 4 | **Ask the partner** whether their rate is publishable | A short conversation, and it is Zaal's to have - there is a live relationship here. | Converts an inference into a fact. If they do not care, option 1 becomes a decision rather than an assumption. |
+
+**Recommendation: 2 now, 4 next - and explicitly not 3.**
+
+Option 2 is cheap and loses nothing: the argument in 12.4 rests on the
+*ratio* between the two quantities, not on either value, so a qualitative
+statement carries the same conclusion. Doing it now stops the repetition
+without waiting on anyone.
+
+Option 4 is what actually closes the question. Everything above is this
+lane's inference from absent public sources; the partner knows the answer.
+If publishable, restore the figures deliberately. If not, 2 was already the
+right move.
+
+**Not 3.** Rewriting public history on a branch other lanes are pushing to is
+high collateral for a value that is already out and probably mirrored - it
+would disrupt other people's work to un-publish something that cannot be
+un-published. The same reasoning that made forward-only correct for the two
+PII findings applies here.
+
+**Still undecided, and still Zaal's.** This lane has not redacted anything,
+and option 2 is not pre-applied - a recommendation that quietly executes
+itself is not a recommendation.
+
 Tracked as **open question 7** in section 10.
 
 ### Issue templates - drafted 2026-08-27, NOT placed
