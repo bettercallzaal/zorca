@@ -927,22 +927,63 @@ def refresh():
                      run=runs[0][:120] if runs else "")
 
 
+REFRESH_GATE = threading.Lock()
+REFRESH_STATE = {"busy": False, "again": False}
+
+
+def refresh_coalesced():
+    """One scrape at a time, and a request during one schedules exactly one more.
+
+    A full refresh takes about a minute for fifteen panes - orca-board costs
+    roughly a second per pane - while the loop ticks every twenty seconds
+    and every tap starts another. So overlapping scrapes were not a risk,
+    they were the normal case: two or three copies of the same work running
+    at once, each spawning a subprocess per pane, each doing a
+    read-modify-write on the claims and trend files with no lock between
+    them.
+
+    Coalescing rather than queueing, because a queue of N identical scrapes
+    is N times the work for one answer. A tap still gets its effect shown:
+    if a scrape is already running, `again` is set and one more runs as soon
+    as it finishes, so the tap's change lands on the next pass instead of
+    being dropped.
+
+    The error state is owned here rather than by the caller, so a coalesced
+    call cannot clear an error it did not disprove.
+    """
+    with REFRESH_GATE:
+        if REFRESH_STATE["busy"]:
+            REFRESH_STATE["again"] = True
+            return False
+        REFRESH_STATE["busy"] = True
+    try:
+        while True:
+            try:
+                refresh()
+                with LOCK:
+                    CACHE["err"] = ""
+            except Exception as e:
+                with LOCK:
+                    CACHE["err"] = "%s: %s" % (type(e).__name__, e)
+                    CACHE["err_ts"] = time.time()
+            with REFRESH_GATE:
+                if not REFRESH_STATE["again"]:
+                    return True
+                REFRESH_STATE["again"] = False
+    finally:
+        with REFRESH_GATE:
+            REFRESH_STATE["busy"] = False
+
+
 def refresher():
     """A dead refresher must not render as a healthy board.
 
     The old version swallowed every exception, so an hour-old cache looked
-    normal. Now the failure rides along in the payload and the header says
-    so (SPEC 2).
+    normal. The failure rides along in the payload now and the header says
+    so (SPEC 2). refresh_coalesced owns that bookkeeping.
     """
     while True:
-        try:
-            refresh()
-            with LOCK:
-                CACHE["err"] = ""
-        except Exception as e:
-            with LOCK:
-                CACHE["err"] = "%s: %s" % (type(e).__name__, e)
-                CACHE["err_ts"] = time.time()
+        refresh_coalesced()
         time.sleep(20)
 
 
@@ -2383,7 +2424,7 @@ class H(BaseHTTPRequestHandler):
             if ok:
                 with LOCK:
                     RESOLVED.add(body["id"])
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/focus" and body.get("handle"):
             if not is_token(body["handle"]):
@@ -2410,7 +2451,7 @@ class H(BaseHTTPRequestHandler):
                 ok = "Created terminal" in out
             except Exception:
                 pass
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/ack" and body.get("key"):
             # SPEC 2420 put new mutation endpoints out of scope. That guard
@@ -2428,7 +2469,7 @@ class H(BaseHTTPRequestHandler):
                 else:
                     d[body["key"]] = time.time()
                 acks_write(d)
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/draft" and body.get("id"):
             item = next((i for i in queue_read() if i["id"] == body["id"]), None)
@@ -2446,7 +2487,7 @@ class H(BaseHTTPRequestHandler):
                 ok = "Sent" in out
             if item:
                 queue_drop(body["id"])
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         else:
             self._send(400, '{"ok": false}')
