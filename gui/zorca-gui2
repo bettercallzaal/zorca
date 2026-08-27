@@ -1500,6 +1500,7 @@ button.mini.ack:hover { color:var(--gold); }
    <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
+   <h2>Lanes running undeclared</h2><div class="card" id="undeclared"></div>
    <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
    <h2>Failing quietly</h2>
    <div class="card jamsrc" id="problems" style="opacity:1"></div>
@@ -2294,6 +2295,7 @@ function unmeasured(){
   say("orphcount", "not measured yet");
   say("refreshcost", "no refresh has completed yet");
   say("problems", "not measured yet");
+  say("undeclared", "not measured yet");
   document.getElementById("needbtn").classList.remove("clear");
   document.getElementById("needsyou").classList.remove("clear");
   document.getElementById("stuck").classList.remove("clear");
@@ -2397,6 +2399,36 @@ function render(s){
       `<b>${stuckShown}</b> of ${stuckAll} stuck &middot; ` +
       `<span class="none">the count above is unfiltered on purpose</span>`;
   }
+  // Derived from panes that are already in the payload - no new field, no
+  // extra bytes on the poll. The count in "Lane purpose matching" says how
+  // many; this says WHICH, with enough to identify the lane and decide
+  // whether it is worth a row.
+  //
+  // When IN-FLIGHT.md cannot be read, every pane looks undeclared. Listing
+  // all of them would be the dashboard inventing a problem out of its own
+  // blindness, so it says what it actually knows instead.
+  const declaredKnown = s.inflight_rows !== null && s.inflight_rows !== undefined;
+  const undeclared = declaredKnown
+    ? (s.panes || []).filter(p => (p.rank || 0) <= 4 && !p.purpose)
+    : [];
+  document.getElementById("undeclared").innerHTML = !declaredKnown
+    ? '<span class="stamp">cannot tell - IN-FLIGHT.md could not be read this ' +
+      'refresh, so every lane would look undeclared</span>'
+    : (undeclared.length
+       ? undeclared.map(p => `
+          <div class="task">
+            <span class="chip r${p.rank}">${esc(p.state)}</span>
+            <span>${esc(p.repo || "(no repo name)")}</span>
+            <span class="stamp">${p.held != null
+              ? (p.held_assumed ? "at least " : "") + ago(p.held) + " in this state"
+              : "state age unknown"}${p.last_ts
+              ? " &middot; landed " + ago(Date.now()/1000 - p.last_ts) + " ago"
+              : " &middot; no commit readable"}</span>
+          </div>`).join("") +
+         `<div class="stamp" style="margin-top:7px">no IN-FLIGHT row names ` +
+         `these, so nothing outside their own pane says what they are for. ` +
+         `Writing the rows is a human's call - this surface only reports.</div>`
+       : '<span class="stamp">every live lane has an IN-FLIGHT row</span>');
   const e = s.estate;
   document.getElementById("aheadlist").innerHTML = !e
     ? '<span class="stamp">no worktree could be read this refresh</span>'
