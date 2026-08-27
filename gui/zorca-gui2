@@ -44,6 +44,11 @@ ACKS = os.environ.get("ZORCA_ACKS",
 # An ack is a statement about a moment. Past this it is shown as stale
 # rather than trusted forever.
 ACK_STALE_S = int(os.environ.get("ZORCA_ACK_STALE_S", str(7 * 86400)))
+# /api/ack is read-modify-write on one file, and ThreadingHTTPServer runs
+# handlers concurrently. Two acks landing together each read the same map,
+# each add their own key, and the second write drops the first - observed,
+# not theorised: three acks fired at once left one in the file.
+ACK_LOCK = threading.Lock()
 
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
@@ -1238,7 +1243,12 @@ button.mini.ack:hover { color:var(--gold); }
 <script>
 const INFLIGHT = new Set();
 async function post(url, body, el){
-  const key = url + "|" + (body.id || body.handle || body.i);
+  // Not `body.id || body.handle || body.i`: an ack carries none of those,
+  // so every ack collapsed to "/api/ack|undefined" and a second ack fired
+  // while the first was in flight was silently dropped. Pick the first field
+  // that is PRESENT, so i=0 still keys correctly.
+  const idf = [body.id, body.handle, body.key, body.i].find(v => v !== undefined);
+  const key = url + "|" + idf;
   if (INFLIGHT.has(key)) return;
   INFLIGHT.add(key);
   if (el) { el.disabled = true; el.dataset.was = el.textContent; el.textContent = "..."; }
@@ -1246,7 +1256,15 @@ async function post(url, body, el){
   try {
     const r = await fetch(url, {method:"POST", body: JSON.stringify(body)});
     ok = r.ok;
-    if (!ok) why = " (" + r.status + ")";
+    if (!ok) {
+      // The server says WHY - a rate limit, a refused origin, a bad id.
+      // A bare status code makes the user guess at something we know.
+      why = " (" + r.status + ")";
+      try {
+        const j = await r.json();
+        if (j && j.why) why = " - " + j.why;
+      } catch (e) {}
+    }
   } catch (e) {
     why = " (no server)";
   }
@@ -2073,6 +2091,50 @@ load(); setInterval(load, 15000);
 </script></body></html>"""
 
 
+# Per-path rate limits: (max requests, window seconds).
+#
+# Only these two. /api/resolve dedupes on the gate id and /api/draft drops
+# the item from the queue as it sends, so a wedged loop hitting either is
+# bounded by its own state. /api/focus is idempotent. These two are the
+# unbounded ones: an ack can be written forever, and a lane creates a
+# terminal that starts a PAID session every time.
+LIMITS = {
+    "/api/lane": (int(os.environ.get("ZORCA_LANE_MAX", "3")),
+                  int(os.environ.get("ZORCA_LANE_WINDOW", "300"))),
+    "/api/ack": (int(os.environ.get("ZORCA_ACK_MAX", "30")),
+                 int(os.environ.get("ZORCA_ACK_WINDOW", "60"))),
+}
+HITS = {}
+HITS_LOCK = threading.Lock()
+
+
+def rate_check(ip, path, now=None):
+    """(allowed, retry_after_seconds).
+
+    A sliding window rather than a counter that resets on the minute: a
+    reset boundary lets a loop fire the whole allowance twice back to back
+    and still look compliant.
+
+    Keyed per (ip, path). Everything here is 127.0.0.1 by design, so in
+    practice this is one bucket per endpoint - which is what is wanted, since
+    the thing being limited is a wedged loop on this machine, not a crowd.
+    """
+    limit = LIMITS.get(path)
+    if not limit:
+        return True, 0
+    cap, window = limit
+    now = now or time.time()
+    key = (ip, path)
+    with HITS_LOCK:
+        seen = [t for t in HITS.get(key, []) if now - t < window]
+        if len(seen) >= cap:
+            HITS[key] = seen
+            return False, max(1, int(window - (now - seen[0])) + 1)
+        seen.append(now)
+        HITS[key] = seen
+    return True, 0
+
+
 # Only these may appear as the Host or the Origin's hostname. Everything
 # else is either a cross-origin page in Zaal's browser or a DNS-rebind
 # pointing a hostile name at 127.0.0.1.
@@ -2129,6 +2191,24 @@ class H(BaseHTTPRequestHandler):
             self._send(403, json.dumps({"ok": False, "why": why}))
         return ok
 
+    def rate_ok(self):
+        ip = (self.client_address or ["?"])[0]
+        allowed, retry = rate_check(ip, self.path)
+        if not allowed:
+            cap, window = LIMITS[self.path]
+            body = json.dumps({"ok": False, "retry_after": retry,
+                               "why": "rate limit: %d per %ds on %s - retry in %ds"
+                                      % (cap, window, self.path, retry)})
+            data = body.encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(retry))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return False
+        return True
+
     def _send(self, code, body, ctype="application/json"):
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
@@ -2150,6 +2230,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self.guard():
+            return
+        if not self.rate_ok():
             return
         n = int(self.headers.get("Content-Length", 0))
         try:
@@ -2211,12 +2293,13 @@ class H(BaseHTTPRequestHandler):
             # alternative, localStorage, would give the phone and the laptop
             # different counts for the same board, which is worse than the
             # deviation.
-            d = acks_read()
-            if body.get("action") == "unack":
-                d.pop(body["key"], None)
-            else:
-                d[body["key"]] = time.time()
-            acks_write(d)
+            with ACK_LOCK:
+                d = acks_read()
+                if body.get("action") == "unack":
+                    d.pop(body["key"], None)
+                else:
+                    d[body["key"]] = time.time()
+                acks_write(d)
             threading.Thread(target=refresh, daemon=True).start()
             self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/draft" and body.get("id"):
