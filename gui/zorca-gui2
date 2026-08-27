@@ -50,7 +50,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
          "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
-         "acks": {}, "ack_stale_s": ACK_STALE_S}
+         "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -711,7 +711,7 @@ def trend_record(values, now=None):
     return out
 
 
-def trend_values(board, tasks, estate, dage):
+def trend_values(board, tasks, estate, dage, grill=None):
     """The one scalar per stat that a direction can be argued about.
 
     Deliberately not every number in a cell. "3 working / 9 waiting / 0 idle"
@@ -732,6 +732,8 @@ def trend_values(board, tasks, estate, dage):
                           else int((time.time() - estate["oldest_unlanded"]) / 86400)),
         "drafts_queued": (None if not dage or dage.get("count") is None
                           else dage["count"]),
+        "grill_outstanding": (grill.get("outstanding")
+                              if grill and grill.get("state") == "ok" else None),
     }
 
 
@@ -762,6 +764,55 @@ def acks_write(d):
     except Exception:
         pass
     return d
+
+
+STATUS_JSON = os.environ.get(
+    "ZORCA_STATUS_JSON", os.path.expanduser("~/.zao/status.json"))
+GRILL_CEILING = int(os.environ.get("ZORCA_GRILL_CEILING", "200"))
+
+
+def grill_state(now=None):
+    """The grill depth, read from the statusline cache rather than re-measured.
+
+    ~/.zao/status.json is written by ~/bin/zao-status-refresh, which SSHes
+    the VPS. Re-running that here would put an 8-second network round trip
+    inside a 20-second refresh loop for a number another process already
+    keeps current. What this owns instead is saying how old that number is,
+    which the cache itself carries two different ways:
+
+      cache_age - since zao-status-refresh last wrote. If this is large the
+                  refresher is dead and every number below it is a fossil.
+      state_age - since the grill's own state file last moved on the VPS.
+                  Large means the grill has stopped sending, which is the
+                  jam itself rather than a measurement problem.
+
+    `outstanding` is the 12h-windowed count the gate compares against the
+    ceiling; `queued` is every card ever asked and unanswered. They are
+    different quantities and were conflated until zaal-dotfiles a979b96.
+    """
+    now = now or time.time()
+    try:
+        d = json.load(open(STATUS_JSON))
+        if not isinstance(d, dict):
+            raise ValueError("status cache is not an object")
+    except Exception as e:
+        return dict(state="unreadable", why="%s: %s" % (type(e).__name__, e))
+
+    def num(k):
+        v = d.get(k)
+        try:
+            return int(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+
+    ts = d.get("ts")
+    try:
+        cache_age = int(now - float(ts)) if ts else None
+    except (TypeError, ValueError):
+        cache_age = None
+    return dict(state="ok", outstanding=num("grill"), queued=num("grill_queued"),
+                state_age=num("grill_age"), cache_age=cache_age,
+                ceiling=GRILL_CEILING, src=STATUS_JSON)
 
 
 def watcher():
@@ -828,8 +879,9 @@ def refresh():
     orphans, orphan_total = inflight_orphans(board)
     estate = estate_sweep([p.get("cwd") for p in board])
     dage = drafts_age()
+    grill = grill_state()
     tasks_now = load_tasks(run_id)
-    trend = trend_record(trend_values(board, tasks_now, estate, dage))
+    trend = trend_record(trend_values(board, tasks_now, estate, dage, grill))
     daily = daily_events()
     with LOCK:
         CACHE.update(ts=time.time(), panes=board, tasks=tasks_now,
@@ -838,7 +890,7 @@ def refresh():
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
                      orphans=orphans, orphan_total=orphan_total, estate=estate,
-                     drafts_age=dage, trend=trend, acks=acks_read(),
+                     drafts_age=dage, grill=grill, trend=trend, acks=acks_read(),
                      ack_stale_s=ACK_STALE_S,
                      run=runs[0][:120] if runs else "")
 
@@ -924,8 +976,16 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn.clear { border-color:var(--line); color:var(--dim); font-weight:400; }
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
+#stripfold > summary { cursor:pointer; list-style:none; padding:2px 0 6px; }
+#stripfold > summary::-webkit-details-marker { display:none; }
+#stripfold > summary::before { content:"\25b8 "; color:var(--dim); }
+#stripfold[open] > summary::before { content:"\25be "; }
+#stripfold > summary:hover .sincehead { color:var(--gold); }
+#stripsummary .bad { color:var(--warn); font-weight:700; }
+#stripsummary .flag { color:var(--gold); }
+#stripsummary .ok { color:var(--ok); }
 #strip { display:grid; gap:8px;
-         grid-template-columns:repeat(auto-fit, minmax(128px, 1fr)); }
+         grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); }
 .cell { background:var(--panel); border:1px solid var(--line);
         border-radius:var(--r); padding:8px 11px; min-width:0; }
 .cell .k { display:block; font-size:11px; letter-spacing:.14em;
@@ -1125,7 +1185,11 @@ button.mini.ack:hover { color:var(--gold); }
  <button id="needbtn" onclick='document.getElementById("needsyou")
    .scrollIntoView({behavior:"smooth", block:"start"})'>
    <span id="needcount">-</span><span class="sub" id="needsub"></span></button>
- <div id="strip"></div>
+ <details id="stripfold">
+  <summary><span class="sincehead">Fleet</span>
+    <span class="stamp" id="stripsummary"></span></summary>
+  <div id="strip"></div>
+ </details>
 </div>
 
 <details id="since">
@@ -1481,6 +1545,7 @@ const TREND_META = {
   lanes_waiting: { cell: "lanes",          of: "waiting",   goodUp: false },
   ahead_total:   { cell: "not on main",    of: "off main",  goodUp: false },
   unlanded_days: { cell: "oldest unlanded", of: "days stranded", goodUp: false },
+  grill_outstanding: { cell: "grill", of: "outstanding", goodUp: false },
   tasks_done:    { cell: "tasks",          of: "done",      goodUp: true  },
   ctx_critical:  { cell: "ctx critical",   of: "ctx-critical", goodUp: false },
   estate_risk:   { cell: "estate at risk", of: "at risk",   goodUp: false },
@@ -1540,7 +1605,54 @@ function draftsCell(s){
   const cls = age > 21600 ? "bad" : age > 3600 ? "flag" : "good";
   return ["oldest draft", "~/.zao/orca-drafts.json",
           `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
-          `<b>${d.count}</b> queued${undated}`, "drafts_queued"];
+          `<b>${d.count}</b> queued${undated}`, "drafts_queued",
+          [age > 21600 ? ["bad", "draft waiting " + ago(age)] : null,
+           d.undated ? ["bad", d.undated + " drafts undated"] : null]];
+}
+
+/* The grill depth, and whether it is actually stuck.
+
+   Two ages, because they fail differently. cache_age is how long since
+   zao-status-refresh wrote this file - if that is large the number is a
+   fossil and nothing below it means anything. state_age is how long since
+   the grill's own state moved on the VPS - if THAT is large the grill has
+   stopped sending, which is the jam rather than a measurement problem. A
+   surface that reported one age would call a dead refresher a jam, or a
+   real jam fresh. */
+function grillCell(s){
+  const g = s.grill;
+  const src = "~/.zao/status.json";
+  if (!g || g.state !== "ok") {
+    return ["grill", src + " unreadable",
+            `<b class="bad">unknown</b>`, "grill_outstanding",
+            [["bad", "grill unreadable"]]];
+  }
+  if (g.cache_age !== null && g.cache_age > 300) {
+    // Refuse to render a depth from a refresher that has stopped.
+    return ["grill", src + ", written by zao-status-refresh",
+            `<b class="bad">stale ${ago(g.cache_age)}</b> - refresher stopped`,
+            "grill_outstanding", [["bad", "grill reading stale " + ago(g.cache_age)]]];
+  }
+  if (g.outstanding === null) {
+    return ["grill", src, `<b class="bad">depth unknown</b>` +
+      (g.queued !== null ? ` &middot; <b>${g.queued}</b> queued` : ""),
+      "grill_outstanding"];
+  }
+  const ceil = g.ceiling || 200;
+  const jam = g.outstanding >= ceil;
+  const near = !jam && g.outstanding >= ceil * 0.8;
+  const cls = jam ? "bad" : near ? "flag" : "good";
+  const quiet = (g.state_age !== null && g.state_age >= 3600)
+    ? ` &middot; <b class="bad">silent ${ago(g.state_age)}</b>` : "";
+  return ["grill", src,
+    `<b class="${cls}">${g.outstanding}/${ceil}</b>${jam ? " JAMMED" : near ? " nearing" : ""}` +
+    (g.queued !== null && g.queued !== g.outstanding
+      ? ` &middot; <b class="nil">${g.queued}</b> queued` : "") + quiet,
+    "grill_outstanding",
+    [jam ? ["bad", "grill JAMMED " + g.outstanding + "/" + ceil]
+     : near ? ["flag", "grill " + g.outstanding + "/" + ceil] : null,
+     (g.state_age !== null && g.state_age >= 3600)
+       ? ["bad", "grill silent " + ago(g.state_age)] : null]];
 }
 
 /* How long the oldest thing off main has been sitting there. `not on main`
@@ -1580,7 +1692,8 @@ function unlandedCell(s){
   const note = acked ? ` <span class="none">(oldest unacked)</span>` : "";
   return ["oldest unlanded", src,
           `<b class="${cls}">${ago(age)}</b> &middot; ${esc(pick.repo)}${note}${unm}`,
-          "unlanded_days"];
+          "unlanded_days",
+          [age > 14*86400 ? ["bad", "unlanded " + ago(age) + " " + pick.repo] : null]];
 }
 
 /* Work that has not reached main. Different question from `unpushed`: a
@@ -1612,7 +1725,8 @@ function estateCell(s){
   const e = s.estate;
   if (!e) {
     return ["estate at risk", "no worktree could be read",
-            `<b class="bad">unknown</b>`, "estate_risk"];
+            `<b class="bad">unknown</b>`, "estate_risk",
+            [["bad", "estate unreadable"]]];
   }
   const bit = (n, label, cls) =>
     `<b class="${n ? cls : "nil"}">${n}</b> ${label}`;
@@ -1621,8 +1735,13 @@ function estateCell(s){
              bit(e.noremote, "no remote", "bad")]
             .join(" &middot; ")
             + (e.unmeasured ? ` &middot; <b class="bad">${e.unmeasured}</b> unreadable` : "");
+  // `dirty` is chronic on a working estate and would sit in the summary
+  // permanently. Only the two that mean "this exists nowhere else" or "we
+  // could not look" get to interrupt.
   return ["estate at risk", `git status, ${e.checked} live worktrees`, v,
-          "estate_risk"];
+          "estate_risk",
+          [e.noremote ? ["bad", e.noremote + " on no remote"] : null,
+           e.unmeasured ? ["bad", e.unmeasured + " repos unreadable"] : null]];
 }
 
 /* The fleet, four numbers wide. A zero that should be zero renders dim; a
@@ -1659,18 +1778,43 @@ function strip(s){
       `<b class="nil">${n(6)}</b> free` +
       (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "") +
       (stuckAcked ? ` &middot; <b class="nil">${stuckAcked}</b> acked` : ""),
-      "lanes_waiting"],
+      "lanes_waiting",
+      [stuck ? ["bad", stuck + " stuck"] : null,
+       idle ? ["flag", idle + " idle"] : null]],
     ["tasks", "orchestration.db", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
-      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`, "tasks_done"],
+      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`, "tasks_done",
+      [blocked ? ["bad", blocked + " tasks blocked"] : null]],
     ["ctx critical", "orca-board, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
-      (critical ? " needs a handoff" : " - none near full"), "ctx_critical"],
-    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null],
+      (critical ? " needs a handoff" : " - none near full"), "ctx_critical",
+      [critical ? ["bad", critical + " ctx-critical"] : null]],
+    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null,
+      [wcls === "bad" ? ["bad", "watcher " + wtxt]
+       : wcls === "flag" ? ["flag", "watcher quiet " + wtxt] : null]],
     estateCell(s),
     draftsCell(s),
     aheadCell(s),
-    unlandedCell(s)
+    unlandedCell(s),
+    grillCell(s)
   ];
+  // Nine readings do not fit above the action list on a 390px phone, and
+  // the action list is the point. So the phone gets the SUMMARY - only the
+  // stats that are not healthy, which is what a glance is for - and the
+  // nine cells, their sources and their trends sit one tap down. A laptop
+  // has the room and keeps them open.
+  // Built from what each cell DECLARES is wrong, not from scanning its
+  // markup for a colour class - the first attempt did that and reported
+  // "tasks 20 done" as a problem, because a healthy cell still contains a
+  // coloured number.
+  const notable = [];
+  cells.forEach(c => (c[4] || []).forEach(a => {
+    if (a) notable.push(`<span class="${a[0]}">${esc(a[1])}</span>`);
+  }));
+  document.getElementById("stripsummary").innerHTML = notable.length
+    ? notable.join(" &middot; ")
+    : `<span class="ok">nothing wrong in ${cells.length} readings</span>`;
+  const sf = document.getElementById("stripfold");
+  if (sf.dataset.userset !== "1") sf.open = window.innerWidth > 900;
   document.getElementById("strip").innerHTML = cells.map(([k, src, v, tk]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
     (tk ? trendSpan(tk, trendNow[tk], s)
@@ -1807,6 +1951,14 @@ async function load(){
      "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
      "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
      "so neither fact alone can tell quiet from dead."],
+    ["grill", "~/.zao/status.json, written by ~/bin/zao-status-refresh, which " +
+      "SSHes the VPS - re-running that here would put an 8s network round trip " +
+      "inside a 20s loop for a number another process already keeps current. " +
+      "`outstanding` is the 12h-windowed count the gate compares against the " +
+      "ceiling; `queued` is every card ever asked and unanswered. They were " +
+      "conflated until zaal-dotfiles a979b96. Two ages are read: since the " +
+      "cache was written (a fossil if large) and since the grill's own state " +
+      "moved on the VPS (the jam itself if large)."],
     ["acknowledge marks", "POST /api/ack writes ~/.zao/zorca-acks.json and " +
       "nothing else - it shells out to nothing and sends nothing to any pane. " +
       "Counts on stuck, orphans and unlanded read UNHANDLED; the raw totals " +
@@ -1912,6 +2064,9 @@ document.addEventListener("keydown", e => {
 });
 // Once Zaal opens or closes the feed himself, stop overriding him.
 document.getElementById("since").addEventListener("toggle", function(){
+  this.dataset.userset = "1";
+});
+document.getElementById("stripfold").addEventListener("toggle", function(){
   this.dataset.userset = "1";
 });
 load(); setInterval(load, 15000);
