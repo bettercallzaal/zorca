@@ -55,6 +55,7 @@ CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
          "daily": [], "gitlog": [], "stuck": [], "orphans": [],
          "orphan_total": 0, "estate": None, "drafts_age": None, "trend": [],
+         "stuck_candidates": 0, "stuck_observed": 0,
          "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
@@ -398,7 +399,20 @@ def stuck_lanes(board, gitmap, claims, now=None):
                         src="orca-board state + git -C " + (p.get("cwd") or "?")
                             + " log -1, tracked in " + CLAIMS))
     out.sort(key=lambda r: -r["held"])
-    return out
+    # Two counts alongside the rows, because "nothing stuck" has two very
+    # different causes and the surface was stating the flattering one. A
+    # cold start has candidates but zero observed, and saying "every working
+    # lane has landed something" there is a claim we cannot support for
+    # another 45 minutes.
+    candidates = sum(1 for p in board if p.get("rank") in (3, 4))
+    observed = 0
+    for p in board:
+        if p.get("rank") not in (3, 4):
+            continue
+        since = (claims.get(p.get("handle")) or {}).get("since")
+        if since and (now - since) >= STALE_CLAIM_S:
+            observed += 1
+    return out, candidates, observed
 
 
 INFLIGHT = os.environ.get(
@@ -880,7 +894,7 @@ def refresh():
     gits = git_scan([p.get("cwd") for p in board])
     gitmap = {g["cwd"]: g for g in gits}
     claims = claims_update(board)
-    stuck = stuck_lanes(board, gitmap, claims)
+    stuck, stuck_candidates, stuck_observed = stuck_lanes(board, gitmap, claims)
     orphans, orphan_total = inflight_orphans(board)
     estate = estate_sweep([p.get("cwd") for p in board])
     dage = drafts_age()
@@ -894,6 +908,7 @@ def refresh():
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
                      daily=daily, gitlog=gits[:12], stuck=stuck,
+                     stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
                      orphans=orphans, orphan_total=orphan_total, estate=estate,
                      drafts_age=dage, grill=grill, trend=trend, acks=acks_read(),
                      ack_stale_s=ACK_STALE_S,
@@ -1496,9 +1511,15 @@ function renderStuck(s){
   const all = s.stuck || [];
   const rows = unhandled(s, all), ackedN = all.length - rows.length;
   const ordered = rows.concat(all.filter(r => ackOf(s, r.key)));
+  const cand = s.stuck_candidates || 0, obs = s.stuck_observed || 0;
   document.getElementById("stuckcount").innerHTML = rows.length === 0
-    ? "nothing unhandled" + (ackedN ? ` - ${ackedN} acked` :
-        " - every working lane has landed something since it started")
+    ? (ackedN ? `nothing unhandled - ${ackedN} acked`
+       : cand === 0 ? "no lane is claiming to work"
+       : obs === 0
+         ? `nothing to report yet - none of the ${cand} working lane` +
+           `${cand === 1 ? " has" : "s have"} been watched long enough to judge`
+         : `nothing unhandled - all ${obs} lane${obs === 1 ? "" : "s"} watched ` +
+           `long enough ${obs === 1 ? "has" : "have"} landed something`)
     : rows.length + " claiming to work with nothing landed"
       + (ackedN ? ` &middot; ${ackedN} acked` : "");
   document.getElementById("stuck").classList.toggle("clear", rows.length === 0);
@@ -1780,6 +1801,15 @@ function strip(s){
     ctx_critical: P.length ? n(0) : null,
     estate_risk: e0 ? e0.dirty + e0.unpushed + e0.noremote : null,
     drafts_queued: (d0 && d0.count !== null && d0.count !== undefined) ? d0.count : null,
+    // Added in cycles 5, 6 and 10 server-side and never mirrored here, so
+    // these three rendered "not measured this refresh" forever even while
+    // the server was recording them. Found by a cold-start pass.
+    ahead_total: e0 ? e0.ahead_total : null,
+    unlanded_days: (e0 && e0.oldest_unlanded)
+      ? Math.floor((Date.now()/1000 - e0.oldest_unlanded) / 86400) : null,
+    grill_outstanding: (s.grill && s.grill.state === "ok"
+      && s.grill.outstanding !== null && s.grill.outstanding !== undefined)
+      ? s.grill.outstanding : null,
   };
   let wcls = "good", wtxt = "-";
   if (!s.watcher_alive) { wcls = "bad"; wtxt = "DOWN"; }
@@ -1901,9 +1931,39 @@ function paneRow(p, dup){
     </div>`;
 }
 
+/* Before the first scrape lands, every count is a default and not a
+   reading. Rendering them produced "0 NEED YOU - the wall is working" and
+   "nothing stuck" on a board that had measured nothing - the same silent
+   failure SPEC 2420 section 2 was written to kill, arriving at boot instead
+   of at refresher death. Found by a cold-start pass, not by reading. */
+function unmeasured(){
+  const say = (id, txt) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  };
+  say("needcount", "NOT MEASURED YET");
+  say("needsub", "the first scrape takes about a minute - this is not a count of zero");
+  say("stripsummary", "nothing measured yet");
+  say("sincecount", "nothing read yet");
+  say("wallsummary", "not measured yet");
+  say("stuckcount", "not measured yet");
+  say("orphcount", "not measured yet");
+  document.getElementById("needbtn").classList.remove("clear");
+  document.getElementById("needsyou").classList.remove("clear");
+  document.getElementById("stuck").classList.remove("clear");
+  ["actions", "feed", "jams", "orphans", "panes", "strip"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<div class="card">not measured yet</div>';
+  });
+  document.getElementById("freshness").innerHTML =
+    '<span class="stale">no reading yet - waiting for the first scrape</span>';
+  document.getElementById("head").classList.add("warn");
+}
+
 async function load(){
   const s = await (await fetch("/api/state")).json();
   document.getElementById("run").textContent = s.run;
+  if (!s.ts) { unmeasured(); return; }
   document.getElementById("runref").textContent = s.run;
   freshness(s);
 
