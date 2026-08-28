@@ -3,6 +3,7 @@
 # Nightly via ~/Library/LaunchAgents/com.zao.zorca-bundle.plist (02:00).
 # Never pushes. Output: ~/.zao/backups/<date>/<repo>.bundle + one daily line.
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
+setopt null_glob   # launchd cannot always see ~/Documents (TCC); a missing glob must skip, not abort
 D="$HOME/.zao/backups/$(date +%F)"; mkdir -p "$D"; n=0; skipped=0; lines=()
 for r in "$HOME/Documents"/*/ "$HOME/Desktop/repos"/*/ "$HOME/orca/workspaces"/*/*/ "$HOME/zao-vault/" "$HOME/zaal-dotfiles/"; do
   [ -e "$r/.git" ] || continue
