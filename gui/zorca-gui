@@ -16,10 +16,12 @@ Run:  zorca-gui            (then open http://127.0.0.1:7777)
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ORCA = "/opt/homebrew/bin/orca"
@@ -52,6 +54,23 @@ def sh(args, timeout=60):
                               timeout=timeout).stdout
     except Exception:
         return ""
+
+
+# A value that starts with a dash is parsed as a FLAG in the space form:
+# `--resolution "--json"` makes orca answer "Missing required --resolution".
+# The `=` form binds the value to its own flag. Every user-supplied value
+# goes through this. (Same fix as gui/zorca-gui2, verified against the CLI.)
+def flag(name, value):
+    return "--%s=%s" % (name, value)
+
+
+# Handles, gate ids and draft ids are opaque tokens, not free text. Anything
+# outside this set cannot be a real id, so it is refused rather than passed on.
+TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+
+def is_token(v):
+    return bool(v) and isinstance(v, str) and bool(TOKEN_RE.match(v))
 
 
 def orca_json(*args):
@@ -101,8 +120,22 @@ MANIFEST = os.path.expanduser(
     "~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md")
 
 
+# A resume target is a UUID or a session NAME (the manifest writes names
+# quoted: `claude --resume "zaostock"`). Both are plain tokens; anything
+# carrying a shell metacharacter is refused, not sanitised.
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$")
+
+
 def load_lanes():
-    """Parked lanes from the vault manifest: | Lane | `worktree` | `cmd` |"""
+    """Parked lanes from the vault manifest: | Lane | `worktree` | `cmd` |
+
+    The manifest is a file every lane can append to, and the command is
+    handed to `orca terminal create --command`, which runs it in a shell.
+    So the session id is EXTRACTED and validated, and the command is built
+    here from a literal - nothing from the file reaches a shell. A refused
+    row keeps its reason in `bad` so the board can say why there is no
+    button.
+    """
     lanes = []
     try:
         for ln in open(MANIFEST):
@@ -114,12 +147,25 @@ def load_lanes():
             name = cells[0]
             wt = cells[1].strip("`").replace("~", os.path.expanduser("~"))
             m = cells[2]
-            cmd = ""
-            if "claude --resume" in m:
-                cmd = "claude --resume " + \
-                    m.split("claude --resume", 1)[1].strip("` ").split("`")[0].split(" - ")[0].strip()
-            if cmd and os.path.isdir(wt):
-                lanes.append(dict(name=name, worktree=wt, cmd=cmd))
+            cmd, bad = "", ""
+            if "claude --resume" not in m:
+                bad = "no `claude --resume` in the row"
+            else:
+                rest = m.split("claude --resume", 1)[1].strip("` ")
+                rest = rest.split("`")[0].split(" - ")[0].strip()
+                rest = rest.strip('"').strip("'").strip()
+                parts = rest.split()
+                if len(parts) > 1:
+                    bad = "row carries more than a session id: %r" % rest[:48]
+                elif not SESSION_RE.match(parts[0] if parts else ""):
+                    bad = "session id is not a plain token: %r" % (rest or "")[:40]
+                else:
+                    cmd = "claude --resume " + parts[0]
+            if not os.path.isdir(wt):
+                continue
+            if name.startswith("-") or wt.startswith("-"):
+                bad = bad or "name or worktree starts with a dash"
+            lanes.append(dict(name=name, worktree=wt, cmd=cmd, bad=bad))
     except Exception:
         pass
     return lanes
@@ -257,32 +303,42 @@ async function post(url, body){
   load();
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
+// Last state the page rendered. Handlers look values up here BY INDEX so
+// that only numbers ever cross into an attribute - a gate option, gate id,
+// draft id or pane handle is free text another lane may have written, and
+// interpolating it into onclick='...' let an apostrophe end the attribute
+// (a hostile option rendered a live onmouseover; an honest "don't merge"
+// rendered a dead button).
+let S = null;
+function resolveGate(gi, oi){
+  const g = S.gates[gi];
+  const r = oi === null ? "Closed by Zaal from ZORCA GUI: addressed, no further action."
+          : oi < 0 ? document.getElementById("in-"+gi).value : g.options[oi];
+  post("/api/resolve", {id: g.id, resolution: r});
+}
 async function load(){
   const s = await (await fetch("/api/state")).json();
+  S = s;
   document.getElementById("run").textContent = s.run;
   document.getElementById("stamp").textContent =
     "as of " + new Date(s.ts*1000).toLocaleTimeString();
   document.getElementById("gcount").textContent = "("+s.gates.length+")";
-  document.getElementById("gates").innerHTML = s.gates.map(g => `
+  document.getElementById("gates").innerHTML = s.gates.map((g,gi) => `
     <div class="card gate">
       <div class="q" style="white-space:pre-wrap">${esc(g.question)}</div>
       <div class="stamp" style="margin-bottom:8px">filed ${esc(g.created_at||"")}
         · task ${esc(g.task_id||"")}</div>
       <div>
-        ${g.options.map(o=>`<button onclick='post("/api/resolve",
-          {id:"${g.id}",resolution:${JSON.stringify(o)}})'>${esc(o)}</button>`).join("")}
-        ${g.options.length==0?`<button onclick='post("/api/resolve",
-          {id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."})'
-          >close - addressed</button>`:""}
-        <input type="text" id="in-${g.id}" placeholder="or type an answer">
-        <button onclick='post("/api/resolve",{id:"${g.id}",
-          resolution:document.getElementById("in-${g.id}").value})'>send</button>
+        ${g.options.map((o,oi)=>`<button onclick='resolveGate(${gi},${oi})'>${esc(o)}</button>`).join("")}
+        ${g.options.length==0?`<button onclick='resolveGate(${gi},null)'>close - addressed</button>`:""}
+        <input type="text" id="in-${gi}" placeholder="or type an answer">
+        <button onclick='resolveGate(${gi},-1)'>send</button>
       </div>
     </div>`).join("") || '<div class="card">nothing needs you</div>';
-  document.getElementById("panes").innerHTML = s.panes.map(p => `
-    <div class="card pane" onclick='post("/api/focus",{handle:"${p.handle}"})'>
+  document.getElementById("panes").innerHTML = s.panes.map((p,pi) => `
+    <div class="card pane" onclick='post("/api/focus",{handle:S.panes[${pi}].handle})'>
       <span class="repo">${esc(p.repo)}</span>
-      <span class="state ${p.state=="ctx-critical"?"hot":(p.rank<=2?"q":"")}">${p.state}</span>
+      <span class="state ${p.state=="ctx-critical"?"hot":(p.rank<=2?"q":"")}">${esc(p.state)}</span>
       <span class="ctx">${p.ctx==null?"-":p.ctx+"%"}</span>
       <span class="detail">${esc(p.question||p.tail||"")}</span>
     </div>`).join("") || '<div class="card">no live panes</div>';
@@ -290,30 +346,30 @@ async function load(){
     <div class="task" style="cursor:pointer" onclick='
       const el=document.getElementById("spec-"+${i});
       el.style.display = el.style.display=="none" ? "block" : "none";'>
-      <span class="st st-${t.status}">${t.status}</span>
+      <span class="st st-${t.status}">${esc(t.status)}</span>
       <span>${esc(t.title)}</span></div>
     <div id="spec-${i}" style="display:none" class="detail"
       ><div style="white-space:normal;padding:4px 0 10px 112px">
-      ${esc(t.spec)}<br><span class="stamp">${t.id} · ${esc(t.updated)}</span>
+      ${esc(t.spec)}<br><span class="stamp">${esc(t.id)} · ${esc(t.updated)}</span>
       </div></div>`).join("");
   document.getElementById("dcount").textContent = "("+s.drafts.length+")";
-  document.getElementById("drafts").innerHTML = s.drafts.map(d => `
+  document.getElementById("drafts").innerHTML = s.drafts.map((d,di) => `
     <div class="card gate">
       <div class="q"><b>${esc(d.repo)}</b>
         <span class="stamp">${esc(d.reason)}</span></div>
       <div class="detail" style="white-space:normal;margin-bottom:8px">${esc(d.text)}</div>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"send"})'>Send</button>
-      <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"})'>Skip</button>
+      <button onclick='post("/api/draft",{id:S.drafts[${di}].id,action:"send"})'>Send</button>
+      <button onclick='post("/api/draft",{id:S.drafts[${di}].id,action:"skip"})'>Skip</button>
     </div>`).join("") || '<div class="card">queue empty</div>';
   document.getElementById("resolved").innerHTML = s.resolved.map(g => `
     <div class="task"><span class="st st-completed">resolved</span>
       <span>${esc(g.question.slice(0,70))} → <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
-    <div class="task"><button style="font:inherit;padding:2px 10px;
+    <div class="task">${l.bad ? `<span class="stamp">refused: ${esc(l.bad)}</span>` : `<button style="font:inherit;padding:2px 10px;
       border-radius:6px;border:1px solid var(--line);background:var(--navy);
       color:var(--gold);cursor:pointer"
-      onclick='post("/api/lane",{i:${i}})'>open</button>
+      onclick='post("/api/lane",{i:${i}})'>open</button>`}
       <span>${esc(l.name)}</span>
       <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
@@ -329,9 +385,44 @@ load(); setInterval(load, 15000);
 </script></body></html>"""
 
 
+# Only these may appear as the Host or the Origin's hostname. Everything
+# else is a cross-origin page in Zaal's browser or a DNS rebind pointing a
+# hostile name at 127.0.0.1.
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def local_only(self):
+        """Refuse the request itself, not just its response: CORS stops a
+        cross-origin page READING the reply, not SENDING the POST, and every
+        POST here acts on something. Host catches a DNS rebind; Origin
+        catches a cross-site page (absent for curl and local scripts, which
+        is allowed - a browser page cannot omit it); Sec-Fetch-Site is the
+        belt to those braces."""
+        host = (self.headers.get("Host") or "").strip()
+        if host.startswith("["):
+            host = host.split("]")[0] + "]"
+        else:
+            host = host.rsplit(":", 1)[0] if ":" in host else host
+        if host not in LOCAL_HOSTS:
+            return False, "Host %r is not local" % host[:60]
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() != "null":
+            try:
+                hostname = urllib.parse.urlparse(origin).hostname or ""
+            except Exception:
+                hostname = ""
+            if hostname not in LOCAL_HOSTS:
+                return False, "Origin %r is cross-site" % origin[:60]
+        elif origin.lower() == "null":
+            return False, "Origin null"
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "same-site", "none"):
+            return False, "Sec-Fetch-Site %r" % site[:40]
+        return True, ""
 
     def _send(self, code, body, ctype="application/json"):
         data = body if isinstance(body, bytes) else body.encode()
@@ -351,19 +442,29 @@ class H(BaseHTTPRequestHandler):
             self._send(404, "{}")
 
     def do_POST(self):
+        ok, why = self.local_only()
+        if not ok:
+            self._send(403, json.dumps({"ok": False, "why": why}))
+            return
         n = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(n) or "{}")
         except Exception:
             body = {}
         if self.path == "/api/resolve" and body.get("id") and body.get("resolution"):
-            out = sh([ORCA, "orchestration", "gate-resolve", "--id", body["id"],
-                      "--resolution", body["resolution"], "--json"])
+            if not is_token(body["id"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad gate id"}))
+                return
+            out = sh([ORCA, "orchestration", "gate-resolve", flag("id", body["id"]),
+                      flag("resolution", body["resolution"]), "--json"])
             ok = '"ok": true' in out or '"ok":true' in out
             threading.Thread(target=refresh, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/focus" and body.get("handle"):
-            sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
+            if not is_token(body["handle"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad handle"}))
+                return
+            sh([ORCA, "terminal", "switch", flag("terminal", body["handle"])])
             self._send(200, '{"ok": true}')
         elif self.path == "/api/lane" and body.get("i") is not None:
             lanes = load_lanes()
@@ -373,9 +474,14 @@ class H(BaseHTTPRequestHandler):
                 # Zaal's tap: open an Orca pane in the lane's worktree and
                 # resume its Claude session. Spawns a paid session - which is
                 # exactly what the button says it does.
-                out = sh([ORCA, "terminal", "create", "--worktree",
-                          "path:" + l["worktree"], "--title", l["name"],
-                          "--command", l["cmd"], "--focus"], timeout=120)
+                if l.get("bad") or not l.get("cmd"):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": l.get("bad") or "no command"}))
+                    return
+                out = sh([ORCA, "terminal", "create",
+                          flag("worktree", "path:" + l["worktree"]),
+                          flag("title", l["name"]),
+                          flag("command", l["cmd"]), "--focus"], timeout=120)
                 ok = "Created terminal" in out
             except Exception:
                 pass
@@ -387,8 +493,12 @@ class H(BaseHTTPRequestHandler):
             if item and body.get("action") == "send":
                 # The human tapped Send - this is Zaal's keystroke, so no
                 # auto-draft prefix; it carries his authority.
-                out = sh([ORCA, "terminal", "send", "--terminal",
-                          item["handle"], "--text", item["text"], "--enter"])
+                if not is_token(item.get("handle")):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": "bad handle in the queue"}))
+                    return
+                out = sh([ORCA, "terminal", "send", flag("terminal", item["handle"]),
+                          flag("text", item["text"]), "--enter"])
                 ok = "Sent" in out
             if item:
                 queue_drop(body["id"])
