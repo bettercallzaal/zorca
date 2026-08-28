@@ -5,9 +5,9 @@
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
 setopt null_glob   # launchd cannot always see ~/Documents (TCC); a missing glob must skip, not abort
 D="$HOME/.zao/backups/$(date +%F)"; mkdir -p "$D"; n=0; skipped=0; lines=()
-for r in "$HOME/Documents"/*/ "$HOME/Desktop/repos"/*/ "$HOME/orca/workspaces"/*/*/ "$HOME/zao-vault/" "$HOME/zaal-dotfiles/"; do
+for r in "$HOME/Documents"/*/ "$HOME/Documents"/*/*/ "$HOME/Desktop/repos"/*/ "$HOME/orca/workspaces"/*/*/ "$HOME/zao-vault/" "$HOME/zaal-dotfiles/"; do
   [ -e "$r/.git" ] || continue
-  name=$(basename "${r%/}"); [[ "$r" == */orca/workspaces/* ]] && name="$(basename "$(dirname "${r%/}")")--$name"
+  name=$(basename "${r%/}"); [[ "$r" == */orca/workspaces/* || "$r" == */Documents/*/*/ ]] && name="$(basename "$(dirname "${r%/}")")--$name"
   # unpushed = commits on any local branch not on any remote ref
   ahead=$(git -C "$r" rev-list --count --branches --not --remotes 2>/dev/null || echo 0)
   [ "${ahead:-0}" -gt 0 ] || { skipped=$((skipped+1)); continue; }
