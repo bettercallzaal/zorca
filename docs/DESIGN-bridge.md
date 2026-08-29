@@ -353,6 +353,18 @@ ZORCA's six carry over. Three more, because a phone is not a desk:
    would be the exact provenance inflation this question was raised to catch.
 5. ~~Does Telegram retain undelivered `getUpdates` for ~24h?~~
    **CLOSED 2026-08-26, deliberately unmeasured.** See section 13.
+7. ~~Is the section 12.4 partner-terms field publicly derivable?~~
+   **CLOSED 2026-08-27: not derivable, therefore gated.** Ruled by Zaal via
+   the orchestrator. **Option 2 applied** - redacted forward in 12.4, both
+   figures replaced by a qualitative statement, argument intact. No history
+   rewrite, per the recommendation in s14: this branch is shared and the
+   values are already out. The workup that produced the options stays in s14
+   as the record.
+
+   **Standing rule from the same ruling:** aggregate figures a stranger
+   cannot derive from public sources gate, **whichever file they sit in** -
+   so the qualitative form is the default for this public repo, not a
+   one-off fix.
 6. ~~One instruction is unread.~~ **CLOSED 2026-08-26.** A mid-turn message
    arrived head-truncated, surviving only as *"e delete call stay Zaal's - do
    not touch either."* The head was **not** reconstructed and nothing was
@@ -633,11 +645,17 @@ preference.**
    idempotent operation with a manual override, or the fallback is a comfort
    rather than a mechanism.
 2. **A webhook does not reduce metered cost if billing is by container
-   uptime.** The container must be running to receive an update. On the only
-   rate datum that exists - derived ~0.837 Cr/hr against a ~12 Cr balance -
-   a permanently-up instance is under a day of runway. Before cutover,
-   measure whether OpenMatter bills uptime or invocation. If uptime, this
-   stage needs a topped-up grant or an explicit budget, not an assumption.
+   uptime.** The container must be running to receive an update. The runtime
+   is metered per compute-hour, and the balance on the account is small
+   relative to continuous uptime - so a permanently-up instance drains it
+   quickly. Before cutover, measure whether OpenMatter bills uptime or
+   invocation. If uptime, this stage needs a topped-up grant or an explicit
+   budget, not an assumption.
+
+   *(Redacted forward 2026-08-27, open question 7 resolved: the rate and the
+   balance were a partner's non-public commercial terms. The argument never
+   rested on either value, only on their ratio, so the conclusion is
+   unchanged. History retains the figures; no rewrite - see s14.)*
 3. **The grant's purpose.** The credits were a partner grant for an agreed
    newsletter-agent beta. Running ZOE's lane control on them is a different
    use. Zaal's call, but it should be made deliberately rather than
@@ -694,3 +712,221 @@ mattering. It stays written down as a belief, never cited as a finding, and
 if a future design puts weight back on it, it gets measured then.
 
 Related: section 11.3 (where it mattered), section 12 (which removed it).
+
+## 14. Handoff - lane closed 2026-08-26
+
+Everything below is recoverable from this file alone. Scrollback is not
+required and should not be trusted; that is the whole reason this document
+carries the state rather than the pane.
+
+### Where the work is
+
+**CORRECTED 2026-08-26, minutes after first writing.** The sentence that
+stood here said `origin` was untouched at `9b64e28`. That was true when
+written and is **false now**, so it is corrected rather than left standing.
+
+Measured: `origin/main` has advanced to `7ea6574`, and **this lane's design
+commits are on it** - `git branch -r --contains` puts `7e2da31`, `55c2471`
+and `717bd74` on `origin/main`. Only the handoff commit remains local.
+
+**This lane never ran `git push`.** The cause is structural, not a breach of
+the hold: every lane in this repo commits to **`main`**, so when another lane
+pushed its own work, it carried every commit already on `main` with it -
+including this one's. A per-lane instruction to hold cannot be honoured on a
+shared branch, because the branch is what gets pushed, not the lane. Anyone
+relying on "do not push" as a containment boundary here should know it is not
+one; a branch per lane would be.
+
+Nothing was deleted at any point. The lane's own diff is still readable as
+`git log 9b64e28..HEAD -- docs/ bin/zorca-actuator bin/zorca-lane-enqueue
+bin/zorca-actuator-test`, filtered by path because the range now interleaves
+another lane's commits.
+
+| What | Where |
+|---|---|
+| The design, v3 | `docs/DESIGN-bridge.md` - live plan is **section 12** ( section 8 superseded) |
+| Mac-side drain | `bin/zorca-actuator` |
+| VPS-side append + record contract | `bin/zorca-lane-enqueue` |
+| Test suite, 16 cases | `bin/zorca-actuator-test` - run it first, it needs no Orca |
+| Task report | `.handoffs/DONE.md` |
+
+### Before anything runs - two things, both Zaal's
+
+1. **The SSH direction.** `queue.mode` supports `ssh` and `local` and
+   **defaults to neither**. The measured position: VPS-to-Mac push cannot
+   work today - Tailscale reports stopped and nothing listens on 22 - so
+   `ssh` (Mac dials out, queue file on the VPS) is the only variant that runs
+   now and the only one that literally keeps zero inbound ports on the Mac.
+2. **The config file** at `~/.zao/zorca-actuator.json`. It does not exist.
+   The actuator refuses to start without it and names every missing key at
+   once. There is no default port: **7777 and 7778 both answer**, so guessing
+   was never available.
+
+The actuator is deliberately **not** wired into `zorca up`. It spends money,
+has no config, and the direction is unratified - three independent reasons.
+
+### The channel rule, which is measurement not preference
+
+This route truncated the **head** of four inbound messages and preserved the
+**tail** every time. Both messages that carried their instruction at the tail
+arrived intact and actionable; the ~2KB message with its corrections at the
+head lost them. On this channel **constraint-last is the rule**. It is the
+`terminal send` head-loss the playbook already records, and it is reliable
+here rather than intermittent.
+
+Corollary worth keeping: every truncation was recoverable because this
+document held the state. A pane that loses its brief can re-read a committed
+file. One that only had the message is finished.
+
+### FLAG for Zaal - a disclosure question this lane cannot decide
+
+`bettercallzaal/zorca` is **public** (`isPrivate: false`, measured), and this
+document is now on its `main`.
+
+Nothing in it is a secret: no tokens, keys, IP addresses or hostnames, and
+`@zaoclaw_bot` is a publicly addressable handle already.
+
+**One item does not clear the estate's own test.** Section 12.4 carries a
+partner's commercial terms that are **not public** - the vendor's pricing
+page does not resolve, so the figures exist here only because they were
+derived from a private call and an account balance. The standing test is
+"could a stranger derive this from public sources alone?" They could not.
+That makes it a disclosure rather than a convenience republication.
+
+**Not fixed here, deliberately.** It is already pushed, so any fix is
+forward-only and history retains it; and deletion or redaction on a public
+repo is Zaal's call, never an agent's - the same rule that governed the two
+PII findings earlier today. Raising it is the whole of this lane's role.
+
+#### The exact field
+
+**Section 12.4, point 2** - the two linked commercial quantities in that
+paragraph: the vendor's **per-hour credit rate** for the metered runtime, and
+the **credit balance** on ZAO's account with them. They are load-bearing
+there because together they yield the runway figure that argues against
+cutover before the billing model is measured.
+
+The **values are deliberately not copied into this section.** Not squeamish-
+ness - an operational reason: they already sit in 12.4, so repeating them
+here adds no disclosure today, but if Zaal redacts 12.4 a duplicate in
+section 14 would survive and silently defeat the redaction. A pointer
+survives a redaction correctly; a copy does not.
+
+#### What a stranger would need to derive them
+
+| Source | Status |
+|---|---|
+| The vendor's public pricing page | **Does not resolve** - recorded in the estate's own research on this vendor; not re-measured by this lane. |
+| Their docs subdomain | **Does not resolve** - same source, same caveat. |
+| A published rate card, partner agreement, or press figure | None found in that research. |
+| The account balance | Visible only inside the vendor's authenticated dashboard, scoped to ZAO's org. |
+| The spoken rate | From a private call transcript held off-repo. |
+| Comparable-vendor inference | Would yield an order-of-magnitude estimate, not these figures - and an estimate that happened to land close would still not be *these* numbers sourced from *this* account. |
+
+#### This lane's read, stated separately from the measurement
+
+**Measured:** every public route above is absent or unresolvable, per the
+estate's own prior research on this vendor.
+
+**Inference, mine, and Zaal owns the leap:** **not derivable.** A stranger
+with only public sources cannot reach either quantity, and the pairing of a
+specific rate with a specific balance is the kind of linkage that exists only
+because ZAO holds an account. On the standing test - *could a stranger derive
+this from public sources alone?* - my read is no, so it gates.
+
+**Counter-argument, so the decision is not one-sided:** the rate is derived
+rather than quoted, the balance is small and time-bounded, and a vendor's
+approximate hourly price is the sort of fact that tends to become public the
+moment they publish a pricing page. If Zaal reads it as commercially
+uninteresting, the cost of leaving it is close to zero. That is his call to
+make, not this lane's to pre-empt.
+
+#### Options, and this lane's recommendation - still undecided
+
+Written out so the decision is a choice between costed paths rather than a
+yes/no. Values are described, never restated, for the reason given above.
+
+| # | Option | Cost | What it buys |
+|---|---|---|---|
+| 1 | **Leave as-is** | The figures keep being published on a public repo every time someone reads 12.4. | Nothing to do. Defensible if the terms are commercially uninteresting - see the counter-argument above. |
+| 2 | **Redact forward** - replace the two quantities with a qualitative statement (metered per compute-hour; balance small relative to continuous uptime) | Ten minutes. History still carries them. | The runway argument in 12.4 survives intact - it never needed the exact numbers, only their ratio - and the repo stops repeating them. |
+| 3 | **Redact + rewrite history** (force-push) | High. This branch is shared: other lanes commit and push to `main`, so a rewrite lands on their work too. Force-push is a gated irreversible. The values are likely already mirrored in clones and caches. | Very little that 2 does not, because the disclosure event already happened. |
+| 4 | **Ask the partner** whether their rate is publishable | A short conversation, and it is Zaal's to have - there is a live relationship here. | Converts an inference into a fact. If they do not care, option 1 becomes a decision rather than an assumption. |
+
+**Recommendation: 2 now, 4 next - and explicitly not 3.**
+
+Option 2 is cheap and loses nothing: the argument in 12.4 rests on the
+*ratio* between the two quantities, not on either value, so a qualitative
+statement carries the same conclusion. Doing it now stops the repetition
+without waiting on anyone.
+
+Option 4 is what actually closes the question. Everything above is this
+lane's inference from absent public sources; the partner knows the answer.
+If publishable, restore the figures deliberately. If not, 2 was already the
+right move.
+
+**Not 3.** Rewriting public history on a branch other lanes are pushing to is
+high collateral for a value that is already out and probably mirrored - it
+would disrupt other people's work to un-publish something that cannot be
+un-published. The same reasoning that made forward-only correct for the two
+PII findings applies here.
+
+**Still undecided, and still Zaal's.** This lane has not redacted anything,
+and option 2 is not pre-applied - a recommendation that quietly executes
+itself is not a recommendation.
+
+Tracked as **open question 7** in section 10.
+
+### Issue templates - drafted 2026-08-27, NOT placed
+
+`docs/drafts/issue-templates/` holds four files: `bug_report.md`,
+`safety_rail.md`, `feature_request.md` and a `config.yml`. **Content only.**
+
+GitHub reads templates from `.github/ISSUE_TEMPLATE/`, and this repo has no
+`.github/` at all - so nothing there is live and nothing changes behaviour
+where it sits. **Placement was named as Zaal's and is deliberately not made:**
+moving them turns them on in the issue composer of a public repo, which is a
+publishing decision rather than a file move. The one-line `git mv` is written
+out in that directory's README.
+
+Two things worth knowing without reading them:
+
+- `safety_rail.md` is the one that earns its place. Every rail here was bought
+  with a real failure, and a rail regressing looks like everything working
+  with one message that should not have been sent. It asks failed-open vs
+  failed-shut, and asks whether anything irreversible happened **first**.
+- **None of the templates asks for logs, config or pane text.** Pane text is
+  real terminal output; actuator config carries a queue host and path; a
+  public issue body is world-readable forever. They ask for the shape of what
+  happened and route the rest privately.
+
+That last choice is generic hygiene and **does not depend on open question
+7**. Nothing in the templates restates or resolves that field.
+
+**Self-scan of the drafts, 2026-08-27.** No host, path, token, email, IP or
+username appears in any of them; the only URL was the repo's own advisory
+endpoint. That endpoint turned out to be a **dead link**: private
+vulnerability reporting is disabled here
+(`gh api repos/bettercallzaal/zorca/private-vulnerability-reporting` ->
+`{"enabled": false}`), so it accepts nothing from outside the repo. The
+contact link is now commented out rather than shipped - a template that says
+"do not file this publicly, use this instead" and then hands the reporter
+nothing is worse than offering no link, because it pushes them to disclose in
+public or to drop it. Enabling reporting is a repo-settings change and
+Zaal's; the command is in `config.yml`.
+
+Reassuring, measured the same pass: **secret scanning and push protection are
+both enabled** on this repo, so a credential in a push is blocked at the
+remote rather than depending on someone noticing.
+
+### Untouched, on instruction - do not assume otherwise
+
+`zorca-gui2` and its files. `bin/zorca`. The delete call. Issue template
+placement. Each was left alone deliberately, not overlooked.
+
+### Open, and closed-with-a-label
+
+Section 10 carries all six. Two are closed at a narrower evidence level than
+was asked for, and that is the point of them: **q4** is confirmed via
+orchestrator relay, **not** Zaal-direct; **q5** is closed deliberately
+unmeasured because nothing rests on it any more (section 13).

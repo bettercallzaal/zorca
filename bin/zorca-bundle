@@ -1,0 +1,20 @@
+#!/bin/zsh
+# zorca-bundle - bundle every repo with unpushed or unbacked commits, local only.
+# Nightly via ~/Library/LaunchAgents/com.zao.zorca-bundle.plist (02:00).
+# Never pushes. Output: ~/.zao/backups/<date>/<repo>.bundle + one daily line.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
+setopt null_glob   # launchd cannot always see ~/Documents (TCC); a missing glob must skip, not abort
+D="$HOME/.zao/backups/$(date +%F)"; mkdir -p "$D"; n=0; skipped=0; lines=()
+for r in "$HOME/Documents"/*/ "$HOME/Documents"/*/*/ "$HOME/Desktop/repos"/*/ "$HOME/orca/workspaces"/*/*/ "$HOME/zao-vault/" "$HOME/zaal-dotfiles/"; do
+  [ -e "$r/.git" ] || continue
+  name=$(basename "${r%/}"); [[ "$r" == */orca/workspaces/* || "$r" == */Documents/*/*/ ]] && name="$(basename "$(dirname "${r%/}")")--$name"
+  # unpushed = commits on any local branch not on any remote ref
+  ahead=$(git -C "$r" rev-list --count --branches --not --remotes 2>/dev/null || echo 0)
+  [ "${ahead:-0}" -gt 0 ] || { skipped=$((skipped+1)); continue; }
+  if git -C "$r" bundle create "$D/$name.bundle" --all --quiet 2>/dev/null; then n=$((n+1)); lines+=("$name:$ahead"); fi
+done
+# keep 7 nights
+ls -1d "$HOME/.zao/backups"/20*/ 2>/dev/null | sort | awk -v keep=7 '{a[NR]=$0} END{for(i=1;i<=NR-keep;i++) print a[i]}' | xargs -I{} rm -rf {} 2>/dev/null
+SUM="bundles $(date '+%F %H:%M'): $n repos with unpushed commits -> $D (${(j:, :)lines}); $skipped clean"
+echo "$SUM"; echo "$SUM" >> "$HOME/.zao/backups/bundle.log"
+DAILY="$HOME/zao-vault/daily/$(date +%F).md"; [ -f "$DAILY" ] && printf '\n- %s\n' "$SUM" >> "$DAILY"

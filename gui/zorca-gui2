@@ -23,10 +23,12 @@ Run:  zorca-gui2           (then open http://127.0.0.1:7778)
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Env-overridable so the staleness path can be exercised without editing
@@ -37,10 +39,51 @@ PORT = 7778
 
 # State cache: pane scraping costs ~1s per pane, so refresh in the
 # background and serve the cache instantly.
+ACKS = os.environ.get("ZORCA_ACKS",
+                      os.path.expanduser("~/.zao/zorca-acks.json"))
+# An ack is a statement about a moment. Past this it is shown as stale
+# rather than trusted forever.
+ACK_STALE_S = int(os.environ.get("ZORCA_ACK_STALE_S", str(7 * 86400)))
+# /api/ack is read-modify-write on one file, and ThreadingHTTPServer runs
+# handlers concurrently. Two acks landing together each read the same map,
+# each add their own key, and the second write drops the first - observed,
+# not theorised: three acks fired at once left one in the file.
+ACK_LOCK = threading.Lock()
+
+# Every subsystem that failed to read or write, and why.
+#
+# Three times this session the same shape has bitten: a layer failed,
+# swallowed it, and the board reported a confident zero. The refresher
+# (cycle 1), the cold start (cycle 12), the renderer (cycle 17). Rather than
+# wait for the fourth, every swallow site records here. Set on failure,
+# CLEARED on the next success, so a fixed problem stops shouting on its own.
+PROBLEMS = {}
+PROBLEMS_LOCK = threading.Lock()
+
+
+def problem(where, exc=None, why=""):
+    with PROBLEMS_LOCK:
+        PROBLEMS[where] = {
+            "why": why or ("%s: %s" % (type(exc).__name__, exc) if exc else "failed"),
+            "ts": time.time(),
+        }
+
+
+def solved(where):
+    with PROBLEMS_LOCK:
+        PROBLEMS.pop(where, None)
+
 CACHE = {"ts": 0, "panes": [], "tasks": [], "gates": [], "run": "",
          "drafts": [], "resolved": [], "lanes": [], "log": [],
          "err": "", "err_ts": 0, "watcher_alive": False, "watcher_ts": 0,
-         "daily": [], "gitlog": []}
+         "daily": [], "gitlog": [], "stuck": [], "orphans": [],
+         "orphan_total": 0, "unmatched_panes": None, "inflight_rows": None,
+         "archive": None,
+         "estate": None, "drafts_age": None, "trend": [],
+         "stuck_candidates": 0, "stuck_observed": 0,
+         "task_counts": {}, "resolved_count": 0,
+         "timings": {}, "refresh_secs": 0, "problems": [],
+         "acks": {}, "ack_stale_s": ACK_STALE_S, "grill": None}
 LOCK = threading.Lock()
 QUEUE = os.environ.get("ZORCA_QUEUE",
                        os.path.expanduser("~/.zao/orca-drafts.json"))
@@ -57,7 +100,32 @@ def queue_read():
 
 def queue_drop(did):
     items = [i for i in queue_read() if i.get("id") != did]
-    json.dump(items, open(QUEUE, "w"), indent=1)
+    try:
+        json.dump(items, open(QUEUE, "w"), indent=1)
+        solved("draft queue")
+    except Exception as e:
+        # The draft was sent and could not be removed - it will be offered
+        # again, which is the one outcome worth shouting about.
+        problem("draft queue", e, why="draft sent but NOT removed from the queue: %s" % e)
+
+
+# A value that starts with a dash is parsed as a FLAG in the space form:
+# `--resolution "--json"` makes orca answer "Missing required --resolution"
+# and drop into non-JSON output, and a craftier value could set a different
+# flag entirely. The `=` form binds the value to its own flag, verified
+# against the real CLI. Every user-supplied value goes through this.
+def flag(name, value):
+    return "--%s=%s" % (name, value)
+
+
+# Handles, gate ids and draft ids are opaque tokens, not free text. Anything
+# outside this set is refused rather than passed along - it cannot be a real
+# id, so the only thing it can be is an attempt.
+TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+
+def is_token(v):
+    return bool(v) and isinstance(v, str) and bool(TOKEN_RE.match(v))
 
 
 def sh(args, timeout=60, strict=False):
@@ -84,9 +152,15 @@ def sh(args, timeout=60, strict=False):
 
 def orca_json(*args):
     out = sh([ORCA] + list(args) + ["--json"], strict=True)
+    tag = "orca " + " ".join(args[:2])
     try:
-        return json.loads(out).get("result", {})
-    except Exception:
+        r = json.loads(out).get("result", {})
+        solved(tag)
+        return r
+    except Exception as e:
+        # An unparseable gate-list becomes zero gates, which the board reads
+        # as "nothing needs you" - the most consequential lie it can tell.
+        problem(tag, e)
         return {}
 
 
@@ -125,8 +199,17 @@ def load_tasks(run_id):
     return rows
 
 
-MANIFEST = os.path.expanduser(
-    "~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md")
+MANIFEST = os.environ.get(
+    "ZORCA_MANIFEST",
+    os.path.expanduser("~/zao-vault/handoffs/orca-resume-manifest-2026-08-25.md"))
+
+
+# A resume target is either a UUID or a session NAME - the manifest says so
+# in its own notes, and five real rows use `claude --resume "zaostock"`.
+# Both are plain tokens; what matters is the charset, not the length, and
+# anything carrying a shell metacharacter is refused rather than sanitised,
+# because sanitising invites the question of what got removed.
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$")
 
 
 def load_lanes():
@@ -142,12 +225,44 @@ def load_lanes():
             name = cells[0]
             wt = cells[1].strip("`").replace("~", os.path.expanduser("~"))
             m = cells[2]
-            cmd = ""
-            if "claude --resume" in m:
-                cmd = "claude --resume " + \
-                    m.split("claude --resume", 1)[1].strip("` ").split("`")[0].split(" - ")[0].strip()
-            if cmd and os.path.isdir(wt):
-                lanes.append(dict(name=name, worktree=wt, cmd=cmd))
+            # The manifest is a markdown file every lane can write to, and
+            # this command is handed to `orca terminal create --command`,
+            # which runs it in a shell. Passing the file's text through
+            # would make any lane that can append a row able to run anything
+            # on this mac: `claude --resume abc; curl evil` parsed cleanly
+            # before this check existed.
+            #
+            # So the session id is EXTRACTED and validated, and the command
+            # is built here from a literal. Nothing from the file reaches a
+            # shell.
+            cmd, bad = "", ""
+            if "claude --resume" not in m:
+                bad = "no `claude --resume` in the row"
+            else:
+                rest = m.split("claude --resume", 1)[1].strip("` ")
+                rest = rest.split("`")[0].split(" - ")[0].strip()
+                # Session names are written quoted in the manifest. Strip
+                # the quotes BEFORE validating, then validate - so a value
+                # like "; rm -rf /" loses its quotes and still fails on the
+                # charset rather than sneaking through as "quoted".
+                rest = rest.strip().strip('"').strip("'").strip()
+                parts = rest.split()
+                if len(parts) > 1:
+                    # Truncating to parts[0] would quietly turn
+                    # `... a1b2c3d4 | nc evil 1234` into a working lane
+                    # opener and say nothing about the tail it dropped. A row
+                    # that carries more than a session id is malformed, and
+                    # the row should hear about it.
+                    bad = "row carries more than a session id: %r" % rest[:48]
+                elif not SESSION_RE.match(parts[0] if parts else ""):
+                    bad = "session id is not a plain token: %r" % (rest or "")[:40]
+                else:
+                    cmd = "claude --resume " + parts[0]
+            if not os.path.isdir(wt):
+                continue
+            if name.startswith("-") or wt.startswith("-"):
+                bad = bad or "name or worktree starts with a dash"
+            lanes.append(dict(name=name, worktree=wt, cmd=cmd, bad=bad))
     except Exception:
         pass
     return lanes
@@ -174,7 +289,11 @@ def daily_events(n=12):
     rows = []
     try:
         lines = open(path).read().splitlines()
-    except Exception:
+        solved("vault daily log")
+    except Exception as e:
+        # No file at all is normal early in a day; anything else is not.
+        if not isinstance(e, (FileNotFoundError, IsADirectoryError)):
+            problem("vault daily log", e)
         return []
     for i, ln in enumerate(lines):
         if not ln.startswith("## "):
@@ -212,7 +331,7 @@ def daily_events(n=12):
     return out[:n]
 
 
-def git_activity(cwds, n=12):
+def git_scan(cwds):
     """Last commit per live worktree - proof of work, not pane text.
 
     A pane's tail says what an agent is saying; a commit says what it landed.
@@ -232,9 +351,701 @@ def git_activity(cwds, n=12):
         except ValueError:
             continue
         rows.append(dict(ts=ts, repo=os.path.basename(cwd), sha=parts[1],
-                         text=parts[2], src="git -C " + cwd + " log -1"))
+                         text=parts[2], cwd=cwd,
+                         src="git -C " + cwd + " log -1"))
     rows.sort(key=lambda r: r["ts"], reverse=True)
-    return rows[:n]
+    return rows
+
+
+CLAIMS = os.environ.get("ZORCA_CLAIMS",
+                        os.path.expanduser("~/.zao/zorca-claims.json"))
+STALE_CLAIM_S = int(os.environ.get("ZORCA_STALE_CLAIM_S", "2700"))  # 45 min
+
+
+def claims_update(board, now=None):
+    """How long each pane has been claiming its current state.
+
+    orca-board reports state but not since-when, so this observes it: the
+    state per handle is written to disk every refresh and the timestamp only
+    moves when the state actually changes.
+
+    It CANNOT know how long a pane was in a state before zorca first saw it.
+    That gap is carried as `assumed`, not papered over - a pane first seen
+    already working reports "at least Nm", never a duration we did not
+    measure.
+    """
+    now = now or time.time()
+    try:
+        old = json.load(open(CLAIMS))
+        if not isinstance(old, dict):
+            raise ValueError("claims file is not an object")
+        solved("claims history")
+    except FileNotFoundError:
+        old = {}
+    except Exception as e:
+        # Recovering by resetting is right; doing it quietly is not - every
+        # duration on the stuck surface just went back to zero.
+        problem("claims history", e, why="unreadable, every stuck duration reset: %s" % e)
+        old = {}
+    if not board:
+        # A blank board is almost always a transient scrape failure, not
+        # fifteen panes closing at once. Overwriting on it would reset every
+        # accumulated duration to zero and the stale-claim surface would go
+        # quiet exactly when it had the most to say.
+        return old
+    new = {}
+    for p in board:
+        h = p.get("handle")
+        if not h:
+            continue
+        prev = old.get(h) or {}
+        if prev.get("state") == p.get("state"):
+            new[h] = prev
+        else:
+            new[h] = {"state": p.get("state"), "since": now,
+                      # first sight of this handle: the state may predate us
+                      "assumed": h not in old}
+    try:
+        tmp = CLAIMS + ".tmp"
+        os.makedirs(os.path.dirname(CLAIMS), exist_ok=True)
+        # Write through a temp file: a half-written claims file would reset
+        # every duration on the next read, which is worse than no file.
+        json.dump(new, open(tmp, "w"), indent=1)
+        os.replace(tmp, CLAIMS)
+        solved("claims file")
+    except Exception as e:
+        # A claims file that will not write means every stuck duration
+        # silently resets on the next restart.
+        problem("claims file", e)
+    return new
+
+
+def stuck_lanes(board, gitmap, claims, now=None):
+    """A lane claiming to work with nothing landed since the claim began.
+
+    Only rank 3-4 - a lane that is waiting on Zaal is not stuck, it is
+    blocked, and that is rail 1's job. A pane whose cwd is not a git repo is
+    skipped entirely: we cannot measure it, so we do not judge it.
+    """
+    now = now or time.time()
+    out = []
+    for p in board:
+        if p.get("rank") not in (3, 4):
+            continue
+        c = claims.get(p.get("handle")) or {}
+        since = c.get("since")
+        if not since:
+            continue
+        held = now - since
+        if held < STALE_CLAIM_S:
+            continue
+        last = gitmap.get(p.get("cwd") or "")
+        if not last:
+            continue
+        if last["ts"] > since:
+            continue
+        out.append(dict(repo=p.get("label") or p.get("repo") or "?",
+                        handle=p.get("handle"),
+                        key="stuck:%s:%d" % (p.get("handle"), int(since)),
+                        state=p.get("state"), held=int(held),
+                        assumed=bool(c.get("assumed")),
+                        last_ts=last["ts"], last_sha=last["sha"],
+                        last_text=last["text"], cwd=p.get("cwd"),
+                        src="orca-board state + git -C " + (p.get("cwd") or "?")
+                            + " log -1, tracked in " + CLAIMS))
+    out.sort(key=lambda r: -r["held"])
+    # Two counts alongside the rows, because "nothing stuck" has two very
+    # different causes and the surface was stating the flattering one. A
+    # cold start has candidates but zero observed, and saying "every working
+    # lane has landed something" there is a claim we cannot support for
+    # another 45 minutes.
+    candidates = sum(1 for p in board if p.get("rank") in (3, 4))
+    observed = 0
+    for p in board:
+        if p.get("rank") not in (3, 4):
+            continue
+        since = (claims.get(p.get("handle")) or {}).get("since")
+        if since and (now - since) >= STALE_CLAIM_S:
+            observed += 1
+    return out, candidates, observed
+
+
+INFLIGHT = os.environ.get(
+    "ZORCA_INFLIGHT",
+    os.path.expanduser("~/zao-vault/handoffs/IN-FLIGHT.md"))
+
+
+def pane_label(p):
+    """What to call a lane on screen.
+
+    orca-board emits BOTH `repo` (the worktree basename) and `title` (the
+    pane's own name), and this file rendered repo and ignored title. Where
+    four panes share one checkout that reads "ZAO OS V1" four times, which
+    defeats the whole point of naming them - the real titles are "ZID
+    assignment collision scanning", "ZAO brand tokens redesign spec", "ZOE
+    send budget gate" and "Zoe-loop orchestrator integration".
+
+    The field audit flagged panes[].title as unread back in cycle 13 and it
+    was filed as server-only rather than questioned. The audit was right and
+    the triage was wrong.
+
+    Orca decorates its titles with a leading status glyph and a trailing
+    connection note; both are stripped, since the state chip already carries
+    status and host=local is not news.
+    """
+    t = (p.get("title") or "").strip()
+    t = re.sub(r"^[^0-9A-Za-z(\[]+", "", t)
+    t = re.sub(r"\s+connected\s+host=\S+\s*$", "", t)
+    t = t.strip()
+    return t
+
+
+def _norm(v):
+    return "".join(c for c in (v or "").lower() if c.isalnum())
+
+
+def inflight_orphans(board, now=None, n=8):
+    """IN-FLIGHT rows whose lane has no live pane - claims nobody is holding.
+
+    The file is the cross-lane map: `| lane | doing | claimed | when |`. A
+    row is a lane saying "I am on this". When the lane is gone and the row
+    is not, the claim outlives the work, and the next lane reads it as live.
+
+    Matching a lane name to a pane is fuzzy on purpose - `fractal` runs in
+    `ZAOfractal`, `meetings` in `zaomeetings` - so it is containment on the
+    alphanumerics of both. The rule is printed in the row's source line
+    rather than hidden, because a fuzzy match that claims to be exact is
+    worse than one that says what it did.
+
+    Dates are PARSED (a979b96). A row whose date will not parse is kept and
+    shown undated - never dropped, because a claim we cannot date is exactly
+    the kind that has been sitting longest.
+    """
+    now = now or time.time()
+    rows = inflight_rows()
+    if rows is None:
+        return [], 0, None
+    return _orphans_and_unmatched(board, rows, now, n)
+
+
+ARCHIVE_AFTER_D = int(os.environ.get("ZORCA_ARCHIVE_AFTER_D", "3"))
+
+
+def archive_proposal(orphans, now=None):
+    """A paste-ready rewrite of IN-FLIGHT.md that MARKS stale rows archived.
+
+    Nothing here edits the file. It emits the whole table with the stale
+    rows annotated in place, so applying it is one replace rather than
+    twenty, and so nothing is deleted - an archived row still says what the
+    lane was doing and when it claimed it.
+
+    Three days because a row at zero or two days is very likely a lane
+    between reboots, while three days of no live pane, across a period when
+    twenty other lanes ran, is a row describing work that stopped.
+    """
+    now = now or time.time()
+    rows = inflight_rows()
+    if rows is None:
+        return {"state": "unreadable"}
+    stale = {o["lane"]: o for o in orphans
+             if o.get("age_days") is not None and o["age_days"] >= ARCHIVE_AFTER_D}
+    try:
+        raw = open(INFLIGHT).read().splitlines()
+        mtime = time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(os.path.getmtime(INFLIGHT)))
+    except Exception as e:
+        problem("IN-FLIGHT.md", e)
+        return {"state": "unreadable"}
+    today = time.strftime("%Y-%m-%d")
+    out, marked, lanes_hit = [], 0, set()
+    for ln in raw:
+        if not ln.startswith("|"):
+            out.append(ln)
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 4 or cells[0].lower() == "lane" or set(cells[0]) <= set("- "):
+            out.append(ln)
+            continue
+        o = stale.get(cells[0])
+        # Only the newest row for a lane is judged; older duplicates of the
+        # same lane are left exactly as they are rather than swept along.
+        if o and cells[3] == o["when"] and not cells[1].startswith("ARCHIVED "):
+            cells[1] = "ARCHIVED %s (no live lane for %dd): %s" % (
+                today, o["age_days"], cells[1])
+            marked += 1
+            lanes_hit.add(cells[0])
+            out.append("| " + " | ".join(cells) + " |")
+        else:
+            out.append(ln)
+    header = [
+        "<!-- proposed by zorca %s - REPLACE the table with this block." % today,
+        "     Generated from IN-FLIGHT.md as it stood at %s (%d lines)." % (mtime, len(raw)),
+        "     If the file has changed since, reload the board and take a fresh copy.",
+        "     %d rows across %d lanes marked ARCHIVED - no live pane matched" % (marked, len(lanes_hit)),
+        "     those lanes for %d days or more. A lane with several rows on its" % ARCHIVE_AFTER_D,
+        "     newest date has all of them marked; older rows are left alone.",
+        "     Nothing is deleted - each archived row keeps its lane, its text and its date.",
+        "     zorca does not write this file. Paste it yourself or do not. -->",
+    ]
+    return {"state": "ok", "marked": marked, "lanes": len(lanes_hit), "mtime": mtime,
+            "threshold_days": ARCHIVE_AFTER_D,
+            "text": "\n".join(header + out)}
+
+
+def inflight_rows():
+    """The newest IN-FLIGHT row per lane, or None if the file cannot be read.
+
+    None and [] are different answers: no rows means the map is empty, while
+    unreadable means we do not know - and both surfaces built on this have to
+    tell those apart rather than rendering "none" for either.
+    """
+    rows = []
+    try:
+        for ln in open(INFLIGHT):
+            if not ln.startswith("|"):
+                continue
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if len(cells) < 4 or cells[0].lower() == "lane" or set(cells[0]) <= set("- "):
+                continue
+            ts = 0
+            try:
+                ts = time.mktime(time.strptime(cells[3][:10], "%Y-%m-%d"))
+            except Exception:
+                ts = 0
+            rows.append(dict(lane=cells[0], doing=cells[1], when=cells[3], ts=ts))
+    except Exception as e:
+        problem("IN-FLIGHT.md", e)
+        return None
+    solved("IN-FLIGHT.md")
+    # One lane, many rows - the newest row is the lane's current claim.
+    newest = {}
+    for r in rows:
+        cur = newest.get(r["lane"])
+        if cur is None or r["ts"] > cur["ts"]:
+            newest[r["lane"]] = r
+    return list(newest.values())
+
+
+def _lane_matches(lane, pane):
+    """Containment on the alphanumerics of both - the same rule the orphan
+    surface has always used, because `fractal` runs in `ZAOfractal` and
+    `meetings` in `zaomeetings`. Fuzzy on purpose, and said so on the page."""
+    a = _norm(lane)
+    if not a:
+        return False
+    for cand in (pane.get("repo"), os.path.basename(pane.get("cwd") or "")):
+        b = _norm(cand)
+        if b and (a in b or b in a):
+            return True
+    return False
+
+
+def _orphans_and_unmatched(board, rows, now, n):
+    """Both directions at once: what each lane is FOR, and what is unmatched.
+
+    A pane with no row is not a failure - a lane can start before anyone
+    writes it down - but it is a gap, and a gap nobody can see is the thing
+    this dashboard keeps turning out to be wrong about.
+    """
+    live = [p for p in board if (p.get("rank") or 0) <= 4]
+    unmatched_panes = 0
+    for p in board:
+        hit = None
+        for r in rows:
+            if _lane_matches(r["lane"], p):
+                hit = r
+                break
+        # Truncated here, not in the page. An IN-FLIGHT `doing` cell runs to
+        # several hundred characters and the wall renders 110 of them, so
+        # shipping the rest put 12 KB back onto every 15s poll that cycle 14
+        # had just taken off.
+        p["purpose"] = (hit["doing"][:130] if hit else "")
+        p["purpose_lane"] = (hit["lane"] if hit else "")
+        p["purpose_when"] = (hit["when"] if hit else "")
+        if not hit and p in live:
+            unmatched_panes += 1
+    newest = {r["lane"]: r for r in rows}
+    out = []
+    for r in newest.values():
+        if not _norm(r["lane"]):
+            continue
+        if any(_lane_matches(r["lane"], p) for p in board):
+            continue
+        # A row that says the lane closed is an accurate record, not an
+        # outliving claim. Counting it would make the surface cry wolf about
+        # the one kind of row that did its job.
+        if "lane closed" in r["doing"].lower():
+            continue
+        r = dict(r)
+        r["age_days"] = int((now - r["ts"]) / 86400) if r["ts"] else None
+        r["src"] = "no live pane matching \"%s\"" % r["lane"]
+        r["key"] = "orphan:%s:%s" % (r["lane"], r["when"])
+        out.append(r)
+    # Oldest claim first - the longer a row outlives its lane, the more
+    # confidently the next lane will believe it.
+    out.sort(key=lambda r: (r["ts"] or 0))
+    return out[:n], len(out), unmatched_panes
+
+
+ESTATE_NOTE = os.environ.get(
+    "ZORCA_ESTATE_NOTE",
+    os.path.expanduser("~/zao-vault/notes/repo-estate.md"))
+
+
+def sh2(args, timeout=15):
+    """Like sh(), but the caller can tell failure from an empty result.
+
+    `git status --porcelain` returns "" for a clean tree AND sh() returns ""
+    for a crash. Collapsing those would report a repo that could not be read
+    as a repo with nothing to lose, which is the worst direction for this
+    number to be wrong in.
+    """
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except Exception:
+        return -1, ""
+
+
+# Default-branch candidates in the order they should be trusted. origin/HEAD
+# is the repo's own answer; the rest are the conventions to fall back on.
+BASE_REFS = ("origin/HEAD", "origin/main", "origin/master", "main", "master")
+
+
+def _ahead_of_main(cwd):
+    """(commits ahead of the default branch, which ref, oldest unlanded ts).
+
+    (None, "", None) when no default branch could be resolved or the count
+    could not be read - a repo whose main we cannot find is not a repo with
+    nothing outstanding.
+
+    The oldest unlanded commit is the LAST line of `git log <base>..HEAD`,
+    not `git log -1`. `-1` returns the newest commit in the range, which
+    answers "when did this lane last commit" - a question two other surfaces
+    already answer. The one nothing answers is how long the oldest thing has
+    been sitting off main, and that is the last line, because git logs
+    newest-first.
+
+    `oldest` is None when the count is known but the log could not be read,
+    so a measurable count never drags an unmeasurable age along with it.
+    """
+    for ref in BASE_REFS:
+        rc, out = sh2(["git", "-C", cwd, "rev-parse", "--verify", "--quiet", ref])
+        if rc != 0 or not out.strip():
+            continue
+        rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", ref + "..HEAD"])
+        if rc2 != 0:
+            return None, "", None
+        try:
+            n = int(out2.strip() or "0")
+        except ValueError:
+            return None, "", None
+        if n == 0:
+            return 0, ref, 0
+        rc3, out3 = sh2(["git", "-C", cwd, "log", ref + "..HEAD", "--format=%ct"])
+        oldest = None
+        if rc3 == 0:
+            stamps = [l for l in out3.split() if l.strip().isdigit()]
+            if stamps:
+                oldest = int(stamps[-1])
+        return n, ref, oldest
+    return None, "", None
+
+
+def estate_sweep(cwds):
+    """Work at risk across the LIVE worktrees - measured, never estimated.
+
+    Scoped to the worktrees on the board rather than the whole mac: the full
+    estate is 48 local clones and sweeping them every 20s would cost more
+    than it tells you. This is the subset that is running right now, which is
+    where uncommitted work is actually being made.
+
+    Anything that cannot be read is counted as `unmeasured` and said out
+    loud. A repo we failed to read is not a repo with nothing at risk.
+
+    Also measures ahead-of-main in the same pass, because it is the same loop
+    over the same repos and spawning git twice per worktree would double the
+    cost of the slowest part of the refresh. The two are different questions:
+    `unpushed` is ahead of the branch's OWN upstream, so a pushed branch is
+    zero; `ahead` is ahead of the default branch, which stays non-zero for
+    every commit that has not merged. A lane committing steadily onto a
+    branch that never lands reads as healthy on the first and does not on the
+    second.
+    """
+    dirty = unpushed = noremote = unmeasured = 0
+    ahead_rows, ahead_unmeasurable, age_unmeasurable = [], 0, 0
+    seen, checked = set(), 0
+    for cwd in cwds:
+        if not cwd or cwd in seen:
+            continue
+        seen.add(cwd)
+        if not os.path.isdir(cwd):
+            continue
+        checked += 1
+        rc, out = sh2(["git", "-C", cwd, "status", "--porcelain"])
+        if rc != 0:
+            unmeasured += 1
+            continue
+        if out.strip():
+            dirty += 1
+        n_ahead, base, oldest_ts = _ahead_of_main(cwd)
+        if n_ahead is None:
+            ahead_unmeasurable += 1
+        elif n_ahead > 0:
+            if oldest_ts is None:
+                age_unmeasurable += 1
+            ahead_rows.append(dict(repo=os.path.basename(cwd), n=n_ahead,
+                                   base=base, cwd=cwd, oldest=oldest_ts,
+                                   key="unlanded:%s:%s" % (cwd, oldest_ts or 0)))
+        rc2, out2 = sh2(["git", "-C", cwd, "rev-list", "--count", "@{u}..HEAD"])
+        if rc2 != 0:
+            # No upstream at all: the branch exists only on this disk.
+            noremote += 1
+            continue
+        try:
+            if int(out2.strip() or "0") > 0:
+                unpushed += 1
+        except ValueError:
+            unmeasured += 1
+    if not checked:
+        # A blank board is a scrape failure, not an estate with nothing in
+        # it. Say unknown rather than paint a reassuring zero.
+        return None
+    swept = ""
+    try:
+        for ln in open(ESTATE_NOTE):
+            if "Measured " in ln:
+                token = ln.split("Measured ", 1)[1].split()[0].strip("`.,")
+                # Parsed, not trusted as a string (a979b96).
+                time.strptime(token, "%Y-%m-%d")
+                swept = token
+                break
+    except Exception:
+        swept = ""
+    # Oldest unlanded work first: 3 commits stranded since July matter more
+    # than 66 from this morning, and sorting by count buries exactly that.
+    ahead_rows.sort(key=lambda r: (r["oldest"] is None, r["oldest"] or 0))
+    dated = [r["oldest"] for r in ahead_rows if r["oldest"]]
+    return dict(checked=checked, dirty=dirty, unpushed=unpushed,
+                noremote=noremote, unmeasured=unmeasured, full_swept=swept,
+                note=ESTATE_NOTE, ahead=ahead_rows[:10],
+                oldest_unlanded=(min(dated) if dated else 0),
+                age_unmeasurable=age_unmeasurable,
+                ahead_total=sum(r["n"] for r in ahead_rows),
+                ahead_repos=len(ahead_rows),
+                ahead_unmeasurable=ahead_unmeasurable)
+
+
+def drafts_age(now=None):
+    """How long the oldest queued draft has been waiting for a tap.
+
+    queue_read() returns [] on any failure, which cannot tell an empty queue
+    from an unreadable one - the same collapse sh() made. This reads the file
+    itself so "nothing is waiting" and "we could not look" stay different
+    answers.
+
+    A draft with no usable ts is counted `undated` and never assumed fresh.
+    The watcher has always written ts, but a hand-edited queue is exactly the
+    case where a guessed age would be wrong and confident.
+    """
+    now = now or time.time()
+    if not os.path.exists(QUEUE):
+        return dict(state="empty", count=0, oldest=0, undated=0)
+    try:
+        items = json.load(open(QUEUE))
+        if not isinstance(items, list):
+            raise ValueError("queue is not a list")
+    except Exception as e:
+        return dict(state="unreadable", count=None, oldest=0, undated=0,
+                    why="%s: %s" % (type(e).__name__, e))
+    oldest, undated = 0, 0
+    for i in items:
+        ts = (i or {}).get("ts")
+        try:
+            ts = float(ts)
+            if ts <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            undated += 1
+            continue
+        if oldest == 0 or ts < oldest:
+            oldest = ts
+    return dict(state="ok", count=len(items), oldest=oldest, undated=undated)
+
+
+TREND = os.environ.get("ZORCA_TREND",
+                       os.path.expanduser("~/.zao/zorca-trend.json"))
+TREND_BUCKET = 600         # one sample per 10 minutes
+TREND_POINTS = 150         # ~25h of buckets, which is what is kept AND served
+
+
+def trend_record(values, now=None):
+    """Append this refresh's readings so a later one can be compared to it.
+
+    A stat that could not be measured is recorded as null, never as zero. A
+    zero would read as a real observation and a later comparison against it
+    would invent a trend out of a failed scrape - which is the exact thing a
+    trend arrow must never do.
+
+    Returns the decimated series to serve: at most one sample per 10 minutes,
+    newest kept, so the payload stays small while still reaching back a day.
+    """
+    now = now or time.time()
+    try:
+        hist = json.load(open(TREND))
+        if not isinstance(hist, list):
+            raise ValueError("trend file is not a list")
+        solved("trend history")
+    except FileNotFoundError:
+        hist = []
+    except Exception as e:
+        problem("trend history", e, why="unreadable, trend baselines reset: %s" % e)
+        hist = []
+    hist = [h for h in hist if isinstance(h, dict) and h.get("ts")]
+    if any(v is not None for v in values.values()):
+        hist.append(dict(ts=int(now), v=values))
+    # Store what is served, not raw samples that are thrown away.
+    #
+    # This used to keep 24h at one sample per 20s - 4320 rows, 835 KB - and
+    # rewrite the whole file every refresh, which is 3.6 GB of disk writes a
+    # day for a dashboard. Every one of those rows was then decimated to
+    # one per 10 minutes before serving, so 97% of that was written and
+    # discarded. Keeping the decimated series loses nothing: the served
+    # resolution has always been ten minutes.
+    #
+    # The newest sample in each bucket wins, so the current bucket updates
+    # in place as the refresh loop runs.
+    out, seen = [], set()
+    for h in reversed(hist):
+        b = int(h["ts"] // TREND_BUCKET)
+        if b in seen:
+            continue
+        seen.add(b)
+        out.append(h)
+        if len(out) >= TREND_POINTS:
+            break
+    out.reverse()
+    try:
+        tmp = TREND + ".tmp"
+        os.makedirs(os.path.dirname(TREND), exist_ok=True)
+        json.dump(out, open(tmp, "w"))
+        os.replace(tmp, TREND)
+        solved("trend file")
+    except Exception as e:
+        problem("trend file", e)
+    return out
+
+
+def trend_values(board, tasks, estate, dage, grill=None):
+    """The one scalar per stat that a direction can be argued about.
+
+    Deliberately not every number in a cell. "3 working / 9 waiting / 0 idle"
+    has no single direction, so the trended scalar is named on the surface
+    rather than left for the reader to guess at.
+    """
+    def rank(r):
+        return sum(1 for p in board if p.get("rank") == r) if board else None
+    st = (lambda x: sum(1 for t in tasks if t.get("status") == x)) if tasks else None
+    return {
+        "lanes_waiting": rank(3),
+        "tasks_done": st("completed") if st else None,
+        "ctx_critical": rank(0),
+        "estate_risk": (None if not estate else
+                        estate["dirty"] + estate["unpushed"] + estate["noremote"]),
+        "ahead_total": None if not estate else estate["ahead_total"],
+        "unlanded_days": (None if not estate or not estate["oldest_unlanded"]
+                          else int((time.time() - estate["oldest_unlanded"]) / 86400)),
+        "drafts_queued": (None if not dage or dage.get("count") is None
+                          else dage["count"]),
+        "grill_outstanding": (grill.get("outstanding")
+                              if grill and grill.get("state") == "ok" else None),
+    }
+
+
+def acks_read():
+    try:
+        d = json.load(open(ACKS))
+        if not isinstance(d, dict):
+            raise ValueError("acks file is not an object")
+        solved("acks history")
+        return d
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        problem("acks history", e, why="unreadable, everything reads unacked: %s" % e)
+        return {}
+
+
+def acks_write(d):
+    """Never prunes on absence.
+
+    A key missing from this refresh may be a transient scrape failure rather
+    than a resolved item, and dropping the ack then would resurrect it as
+    unhandled the moment the scrape recovered. Keys embed the fact they
+    describe, so a changed fact makes a new key and the old one ages out on
+    time alone.
+    """
+    cutoff = time.time() - 90 * 86400
+    d = {k: v for k, v in d.items() if isinstance(v, (int, float)) and v > cutoff}
+    try:
+        tmp = ACKS + ".tmp"
+        os.makedirs(os.path.dirname(ACKS), exist_ok=True)
+        json.dump(d, open(tmp, "w"), indent=1)
+        os.replace(tmp, ACKS)
+        solved("acks file")
+    except Exception as e:
+        # The tap looked like it worked and the ack is not on disk.
+        problem("acks file", e)
+    return d
+
+
+STATUS_JSON = os.environ.get(
+    "ZORCA_STATUS_JSON", os.path.expanduser("~/.zao/status.json"))
+GRILL_CEILING = int(os.environ.get("ZORCA_GRILL_CEILING", "200"))
+
+
+def grill_state(now=None):
+    """The grill depth, read from the statusline cache rather than re-measured.
+
+    ~/.zao/status.json is written by ~/bin/zao-status-refresh, which SSHes
+    the VPS. Re-running that here would put an 8-second network round trip
+    inside a 20-second refresh loop for a number another process already
+    keeps current. What this owns instead is saying how old that number is,
+    which the cache itself carries two different ways:
+
+      cache_age - since zao-status-refresh last wrote. If this is large the
+                  refresher is dead and every number below it is a fossil.
+      state_age - since the grill's own state file last moved on the VPS.
+                  Large means the grill has stopped sending, which is the
+                  jam itself rather than a measurement problem.
+
+    `outstanding` is the 12h-windowed count the gate compares against the
+    ceiling; `queued` is every card ever asked and unanswered. They are
+    different quantities and were conflated until zaal-dotfiles a979b96.
+    """
+    now = now or time.time()
+    try:
+        d = json.load(open(STATUS_JSON))
+        if not isinstance(d, dict):
+            raise ValueError("status cache is not an object")
+    except Exception as e:
+        return dict(state="unreadable", why="%s: %s" % (type(e).__name__, e))
+
+    def num(k):
+        v = d.get(k)
+        try:
+            return int(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+
+    ts = d.get("ts")
+    try:
+        cache_age = int(now - float(ts)) if ts else None
+    except (TypeError, ValueError):
+        cache_age = None
+    return dict(state="ok", outstanding=num("grill"), queued=num("grill_queued"),
+                state_age=num("grill_age"), cache_age=cache_age,
+                ceiling=GRILL_CEILING, src=STATUS_JSON)
 
 
 def watcher():
@@ -265,8 +1076,14 @@ def tail_log(n=14):
             f.seek(0, 2)
             f.seek(max(0, f.tell() - 8192))
             lines = f.read().decode(errors="replace").splitlines()
+        solved("watcher log")
         return [l for l in lines if l.strip()][-n:]
-    except Exception:
+    except Exception as e:
+        # A missing log is normal before the watcher first writes; an
+        # unreadable one means the trail below is empty for a reason the
+        # page would otherwise present as "watcher not running".
+        if not isinstance(e, FileNotFoundError):
+            problem("watcher log", e)
         return []
 
 
@@ -278,49 +1095,171 @@ def current_run():
     return ""
 
 
+class Stages(object):
+    """Wall-clock per stage of a refresh, so tuning aims at the slow half.
+
+    Kept in the payload rather than a log line: a number you have to go
+    looking for is a number nobody looks at, and this one decides what is
+    worth optimising.
+    """
+
+    def __init__(self):
+        self.t = {}
+
+    def time(self, name):
+        outer = self
+
+        class _T(object):
+            def __enter__(self):
+                self.t0 = time.time()
+                return self
+
+            def __exit__(self, *a):
+                outer.t[name] = round(time.time() - self.t0, 2)
+                return False
+        return _T()
+
+
 def refresh():
+    st = Stages()
     # No bare except here: if orca-board is gone or its JSON is garbage the
     # board is blind, and a blind board must say so (SPEC 2).
-    board = json.loads(sh(["python3", BOARD, "--json"], timeout=120,
-                          strict=True) or "[]")
-    run_id = current_run()
-    gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
-    for g in gates:
-        try:
-            g["options"] = json.loads(g.get("options") or "[]")
-        except Exception:
-            g["options"] = []
-    runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
+    with st.time("board"):
+        board = json.loads(sh(["python3", BOARD, "--json"], timeout=120,
+                              strict=True) or "[]")
+    with st.time("run"):
+        run_id = current_run()
+    with st.time("gates"):
+        gates = orca_json("orchestration", "gate-list", "--run", run_id).get("gates", [])
+        for g in gates:
+            try:
+                g["options"] = json.loads(g.get("options") or "[]")
+            except Exception:
+                g["options"] = []
+        runs = sh([ORCA, "orchestration", "run-list"], strict=True).splitlines()
     pending = [g for g in gates if g.get("status") == "pending"]
     resolved = [g for g in gates if g.get("status") != "pending"]
-    w_alive, w_ts = watcher()
-    gits = git_activity([p.get("cwd") for p in board])
-    daily = daily_events()
+    with st.time("watcher"):
+        w_alive, w_ts = watcher()
+    with st.time("git_scan"):
+        gits = git_scan([p.get("cwd") for p in board])
+        gitmap = {g["cwd"]: g for g in gits}
+    claims = claims_update(board)
+    stuck, stuck_candidates, stuck_observed = stuck_lanes(board, gitmap, claims)
+    # Attach the work each pane has actually done. Both numbers are already
+    # computed for the stuck surface and the estate sweep; the wall was the
+    # one place showing pane text without them, so a lane that had committed
+    # nothing for a day looked identical to one that had just landed.
+    _now = time.time()
+    for p in board:
+        # One derivation, so every surface calls a lane the same thing.
+        p["label"] = pane_label(p) or p.get("repo") or "(unnamed lane)"
+        g = gitmap.get(p.get("cwd") or "")
+        p["last_ts"] = g["ts"] if g else None
+        p["last_sha"] = g["sha"] if g else ""
+        p["last_text"] = g["text"] if g else ""
+        c = claims.get(p.get("handle")) or {}
+        p["held"] = int(_now - c["since"]) if c.get("since") else None
+        p["held_assumed"] = bool(c.get("assumed"))
+    with st.time("orphans"):
+        orphans, orphan_total, unmatched_panes = inflight_orphans(board, n=999)
+        iflrows = inflight_rows()
+        archive = archive_proposal(orphans)
+        orphans = orphans[:8]
+    with st.time("estate"):
+        estate = estate_sweep([p.get("cwd") for p in board])
+    with st.time("drafts"):
+        dage = drafts_age()
+    with st.time("grill"):
+        grill = grill_state()
+    with st.time("tasks"):
+        tasks_now = load_tasks(run_id)
+    # The strip needs the counts on every poll; the fold needs the rows only
+    # when it opens. Counting here keeps the lean payload two small numbers.
+    counts = {}
+    for t in tasks_now:
+        k = t.get("status") or "?"
+        counts[k] = counts.get(k, 0) + 1
+    trend = trend_record(trend_values(board, tasks_now, estate, dage, grill))
+    with st.time("daily"):
+        daily = daily_events()
     with LOCK:
-        CACHE.update(ts=time.time(), panes=board, tasks=load_tasks(run_id),
+        CACHE.update(ts=time.time(), panes=board, tasks=tasks_now,
+                     task_counts=counts, resolved_count=len(resolved),
                      gates=pending, resolved=resolved[-8:],
                      drafts=queue_read(), lanes=load_lanes(),
                      log=tail_log(), watcher_alive=w_alive, watcher_ts=w_ts,
-                     daily=daily, gitlog=gits,
+                     timings=st.t, refresh_secs=round(sum(st.t.values()), 1),
+                     problems=[dict(where=k, why=v["why"], ts=v["ts"])
+                               for k, v in sorted(PROBLEMS.items())],
+                     daily=daily, gitlog=gits[:12], stuck=stuck,
+                     stuck_candidates=stuck_candidates, stuck_observed=stuck_observed,
+                     orphans=orphans, orphan_total=orphan_total,
+                     unmatched_panes=unmatched_panes, archive=archive,
+                     inflight_rows=(len(iflrows) if iflrows is not None else None),
+                     estate=estate,
+                     drafts_age=dage, grill=grill, trend=trend, acks=acks_read(),
+                     ack_stale_s=ACK_STALE_S,
                      run=runs[0][:120] if runs else "")
+
+
+REFRESH_GATE = threading.Lock()
+REFRESH_STATE = {"busy": False, "again": False}
+
+
+def refresh_coalesced():
+    """One scrape at a time, and a request during one schedules exactly one more.
+
+    A full refresh takes about a minute for fifteen panes - orca-board costs
+    roughly a second per pane - while the loop ticks every twenty seconds
+    and every tap starts another. So overlapping scrapes were not a risk,
+    they were the normal case: two or three copies of the same work running
+    at once, each spawning a subprocess per pane, each doing a
+    read-modify-write on the claims and trend files with no lock between
+    them.
+
+    Coalescing rather than queueing, because a queue of N identical scrapes
+    is N times the work for one answer. A tap still gets its effect shown:
+    if a scrape is already running, `again` is set and one more runs as soon
+    as it finishes, so the tap's change lands on the next pass instead of
+    being dropped.
+
+    The error state is owned here rather than by the caller, so a coalesced
+    call cannot clear an error it did not disprove.
+    """
+    with REFRESH_GATE:
+        if REFRESH_STATE["busy"]:
+            REFRESH_STATE["again"] = True
+            return False
+        REFRESH_STATE["busy"] = True
+    try:
+        while True:
+            try:
+                refresh()
+                with LOCK:
+                    CACHE["err"] = ""
+            except Exception as e:
+                with LOCK:
+                    CACHE["err"] = "%s: %s" % (type(e).__name__, e)
+                    CACHE["err_ts"] = time.time()
+            with REFRESH_GATE:
+                if not REFRESH_STATE["again"]:
+                    return True
+                REFRESH_STATE["again"] = False
+    finally:
+        with REFRESH_GATE:
+            REFRESH_STATE["busy"] = False
 
 
 def refresher():
     """A dead refresher must not render as a healthy board.
 
     The old version swallowed every exception, so an hour-old cache looked
-    normal. Now the failure rides along in the payload and the header says
-    so (SPEC 2).
+    normal. The failure rides along in the payload now and the header says
+    so (SPEC 2). refresh_coalesced owns that bookkeeping.
     """
     while True:
-        try:
-            refresh()
-            with LOCK:
-                CACHE["err"] = ""
-        except Exception as e:
-            with LOCK:
-                CACHE["err"] = "%s: %s" % (type(e).__name__, e)
-                CACHE["err_ts"] = time.time()
+        refresh_coalesced()
         time.sleep(20)
 
 
@@ -386,7 +1325,20 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 #needbtn.clear { border-color:var(--line); color:var(--dim); font-weight:400; }
 #needbtn .sub { display:block; font-size:12px; font-weight:400;
                 letter-spacing:0; color:var(--dim); margin-top:3px; }
-#strip { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+#filterbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+             margin:0 0 10px; }
+#filter { flex:1 1 220px; width:auto; min-width:0; }
+#filterstat { flex:1 1 100%; }
+#stripfold > summary { cursor:pointer; list-style:none; padding:2px 0 6px; }
+#stripfold > summary::-webkit-details-marker { display:none; }
+#stripfold > summary::before { content:"\25b8 "; color:var(--dim); }
+#stripfold[open] > summary::before { content:"\25be "; }
+#stripfold > summary:hover .sincehead { color:var(--gold); }
+#stripsummary .bad { color:var(--warn); font-weight:700; }
+#stripsummary .flag { color:var(--gold); }
+#stripsummary .ok { color:var(--ok); }
+#strip { display:grid; gap:8px;
+         grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); }
 .cell { background:var(--panel); border:1px solid var(--line);
         border-radius:var(--r); padding:8px 11px; min-width:0; }
 .cell .k { display:block; font-size:11px; letter-spacing:.14em;
@@ -396,11 +1348,21 @@ h2 { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
 .good { color:var(--ok); } .bad { color:var(--warn); } .flag { color:var(--gold); }
 .nil { color:var(--dim); }
 
+.cell .trend { display:block; font-size:11px; margin-top:3px; }
+.cell .trend .none { color:var(--dim); opacity:.75; }
 .cell .src { display:block; font-size:10px; color:var(--dim); opacity:.75;
              margin-top:3px; line-height:1.3; }
 
 /* what happened since you last looked - the feed, not the panes */
 #since { margin-top:22px; }
+#since > summary { cursor:pointer; list-style:none; padding:2px 0; }
+#since > summary::-webkit-details-marker { display:none; }
+#since > summary::before { content:"\25b8 "; color:var(--dim); }
+#since[open] > summary::before { content:"\25be "; }
+#since > summary:hover .sincehead { color:var(--gold); }
+.sincehead { font-size:12px; text-transform:uppercase; letter-spacing:.18em;
+             color:var(--dim); }
+#feed { margin-top:10px; }
 .ev { display:flex; gap:8px 10px; align-items:baseline; flex-wrap:wrap;
       background:var(--panel); border:1px solid var(--line);
       border-left:3px solid var(--line); border-radius:var(--r);
@@ -470,6 +1432,7 @@ input[type=text] { width:58%; cursor:text; }
 .pane { display:flex; gap:12px; align-items:baseline; padding:9px 14px; }
 .pane:hover .repo { color:var(--gold); }
 .repo { min-width:170px; font-weight:600; }
+.inrepo { font-weight:400; color:var(--dim); font-size:12px; }
 .chip { display:inline-block; min-width:118px; padding:1px 8px;
         border-radius:5px; border-left:3px solid var(--line);
         background:transparent; font-size:13px; color:var(--dim); }
@@ -482,8 +1445,46 @@ input[type=text] { width:58%; cursor:text; }
 .ctx.hot { color:var(--warn); }
 .detail { color:var(--dim); font-size:13px; overflow:hidden;
           text-overflow:ellipsis; white-space:nowrap; }
+.worked { flex:1 1 100%; font-size:12px; margin-top:4px; min-width:0;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.worked .none { color:var(--dim); opacity:.8; }
+.worked .good { color:var(--ok); }
+.worked .flag { color:var(--gold); }
+.worked .purpose { color:var(--text); }
+#archive pre { white-space:pre; overflow:auto; max-height:340px; font-size:11px;
+               background:var(--navy); border:1px solid var(--line);
+               border-radius:6px; padding:10px; margin-top:8px; }
+#archive summary { cursor:pointer; color:var(--gold); padding:4px 0; }
+.worked { white-space:normal; }
 #wallsummary { font-size:13px; letter-spacing:0; text-transform:none; }
 #wallsummary .idle { color:var(--gold); }
+
+/* what is stuck - a lane claiming to work with nothing landed */
+#stuck { margin-top:26px; }
+#stuck h2 { color:var(--warn); }
+#stuck.clear h2 { color:var(--dim); }
+.jam { background:var(--panel); border:1px solid var(--line-interactive);
+       border-left:3px solid var(--warn); border-radius:var(--r);
+       padding:11px 14px; margin-bottom:9px; cursor:pointer; }
+.jam:hover { background:var(--panel-raised); }
+.jamline { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+.jamwhy { color:var(--warn); font-size:13px; }
+.jamlast { color:var(--dim); font-size:13px; margin-top:5px;
+           display:-webkit-box; -webkit-line-clamp:2;
+           -webkit-box-orient:vertical; overflow:hidden; }
+.jamsrc { display:block; font-size:10px; color:var(--dim); opacity:.75;
+          margin-top:5px; line-height:1.3; }
+h3 { font-size:12px; text-transform:uppercase; letter-spacing:.14em;
+     color:var(--dim); font-weight:400; margin:20px 0 9px; }
+.orph { border-left-color:var(--gold); cursor:default; }
+.orph:hover { background:var(--panel); }
+.orphage { color:var(--gold); font-size:13px; }
+.jam.acked { border-left-color:var(--line); opacity:.62; }
+.ackline { margin-top:7px; font-size:12px; color:var(--dim); }
+.ackline b { color:var(--dim); }
+.ackline .stale { color:var(--gold); }
+button.mini.ack { color:var(--dim); }
+button.mini.ack:hover { color:var(--gold); }
 
 /* rail 3 - reference, folded away */
 #ref { margin-top:30px; border-top:1px solid var(--line); padding-top:8px; }
@@ -523,7 +1524,10 @@ input[type=text] { width:58%; cursor:text; }
      wall drops the duplicate. On desktop both stay, so the wall reads as a
      complete picture of what is running. */
   #panes .pane.dup { display:none; }
-  #strip { grid-template-columns:1fr 1fr; }
+  #strip { grid-template-columns:1fr 1fr; gap:6px; }
+  .cell { padding:6px 9px; }
+  .cell .trend { margin-top:2px; }
+  .cell .src { margin-top:2px; }
   #sincecount { display:block; margin-top:2px; }
   #needbtn { font-size:17px; }
   .actline { gap:8px; }
@@ -546,13 +1550,25 @@ input[type=text] { width:58%; cursor:text; }
  <button id="needbtn" onclick='document.getElementById("needsyou")
    .scrollIntoView({behavior:"smooth", block:"start"})'>
    <span id="needcount">-</span><span class="sub" id="needsub"></span></button>
- <div id="strip"></div>
+ <div id="filterbar">
+  <input type="text" id="filter" placeholder="filter lanes by repo, task or text"
+    oninput='setFilter(this.value)' autocomplete="off" spellcheck="false">
+  <button class="mini" id="filterclear" style="display:none"
+    onclick='document.getElementById("filter").value=""; setFilter("")'>clear</button>
+  <span class="stamp" id="filterstat"></span>
+ </div>
+ <details id="stripfold">
+  <summary><span class="sincehead">Fleet</span>
+    <span class="stamp" id="stripsummary"></span></summary>
+  <div id="strip"></div>
+ </details>
 </div>
 
-<section id="since">
- <h2>Since you last looked <span class="stamp" id="sincecount"></span></h2>
+<details id="since">
+ <summary><span class="sincehead">Since you last looked</span>
+   <span class="stamp" id="sincecount"></span></summary>
  <div id="feed"></div>
-</section>
+</details>
 
 <section id="needsyou">
  <h2>Do these in order</h2>
@@ -562,6 +1578,14 @@ input[type=text] { width:58%; cursor:text; }
 <section id="wall">
  <h2>The wall <span class="stamp" id="wallsummary"></span></h2>
  <div id="panes"></div>
+</section>
+
+<section id="stuck">
+ <h2>Stuck <span class="stamp" id="stuckcount"></span></h2>
+ <div id="jams"></div>
+ <h3>Claims outliving their lane <span class="stamp" id="orphcount"></span></h3>
+ <div class="jamsrc" id="orphsrc" style="margin:-4px 0 9px"></div>
+ <div id="orphans"></div>
 </section>
 
 <details id="ref">
@@ -576,6 +1600,16 @@ input[type=text] { width:58%; cursor:text; }
    <div class="card" id="wlog" style="font-size:12px;color:var(--dim);
      max-height:220px;overflow-y:auto"></div>
    <h2>Free and finished</h2><div class="card" id="coldpanes"></div>
+   <h2>Lanes running undeclared</h2><div class="card" id="undeclared"></div>
+   <h2>Stale IN-FLIGHT rows</h2>
+   <div class="card" id="archive"></div>
+   <h2>Not on main, per lane</h2><div class="card" id="aheadlist"></div>
+   <h2>Failing quietly</h2>
+   <div class="card jamsrc" id="problems" style="opacity:1"></div>
+   <h2>What the refresh costs</h2>
+   <div class="card jamsrc" id="refreshcost" style="opacity:1"></div>
+   <h2>Where these numbers live</h2>
+   <div class="card jamsrc" id="provenance" style="opacity:1"></div>
   </div>
  </div>
 </details>
@@ -583,7 +1617,12 @@ input[type=text] { width:58%; cursor:text; }
 <script>
 const INFLIGHT = new Set();
 async function post(url, body, el){
-  const key = url + "|" + (body.id || body.handle || body.i);
+  // Not `body.id || body.handle || body.i`: an ack carries none of those,
+  // so every ack collapsed to "/api/ack|undefined" and a second ack fired
+  // while the first was in flight was silently dropped. Pick the first field
+  // that is PRESENT, so i=0 still keys correctly.
+  const idf = [body.id, body.handle, body.key, body.i].find(v => v !== undefined);
+  const key = url + "|" + idf;
   if (INFLIGHT.has(key)) return;
   INFLIGHT.add(key);
   if (el) { el.disabled = true; el.dataset.was = el.textContent; el.textContent = "..."; }
@@ -591,7 +1630,15 @@ async function post(url, body, el){
   try {
     const r = await fetch(url, {method:"POST", body: JSON.stringify(body)});
     ok = r.ok;
-    if (!ok) why = " (" + r.status + ")";
+    if (!ok) {
+      // The server says WHY - a rate limit, a refused origin, a bad id.
+      // A bare status code makes the user guess at something we know.
+      why = " (" + r.status + ")";
+      try {
+        const j = await r.json();
+        if (j && j.why) why = " - " + j.why;
+      } catch (e) {}
+    }
   } catch (e) {
     why = " (no server)";
   }
@@ -609,6 +1656,43 @@ function toast(msg, ok){
 }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
 
+/* One box narrows the wall, the action list and the stuck section together.
+   At twenty-one panes a flat list is not findable, and three separate
+   filters would be three things to keep in sync by hand.
+
+   It never touches the NEEDS-YOU count. That number answers "what is
+   waiting on me", and a filter is a question about the screen, not about
+   the world - narrowing the count would make the one honest number on the
+   page depend on what happens to be typed in a box. */
+let FILTER = "";
+function hit(){
+  const q = FILTER.trim().toLowerCase();
+  if (!q) return true;
+  for (let i = 0; i < arguments.length; i++) {
+    const v = arguments[i];
+    if (v != null && String(v).toLowerCase().indexOf(q) >= 0) return true;
+  }
+  return false;
+}
+function setFilter(v){
+  FILTER = v || "";
+  const clear = document.getElementById("filterclear");
+  if (clear) clear.style.display = FILTER ? "inline-block" : "none";
+  if (LAST) render(LAST);
+}
+/* esc() leaves quotes alone, which is fine for text and NOT fine inside a
+   single-quoted onclick. Lane names come from a markdown table and worktree
+   paths come from disk; either can contain an apostrophe, and one would end
+   the attribute early. */
+function attr(s){ return esc(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;"); }
+/* A JS value safe to drop inside a single-quoted onclick. JSON.stringify
+   alone is not enough: it escapes double quotes and leaves apostrophes
+   alone, so a gate option reading "don't merge" ends the attribute and the
+   rest of the option becomes markup. Every interpolated value goes through
+   this - ids, handles and free text alike - because "this one is a UUID"
+   stops being true the day something upstream changes format. */
+function js(v){ return attr(JSON.stringify(v)); }
+
 /* ZORCA already holds danger-worded drafts on rail 1. The GUI was the one
    surface where that hold was invisible - this only renders it. No override
    is added: a held draft is still sendable, it just costs a second tap. */
@@ -623,11 +1707,19 @@ function danger(reason){
    (private window, blocked site data) - a feed with no NEW marks is still a
    feed, so every access is guarded and failure is silent by design. */
 let SEEN = null;
+let STORAGE_ERR = "";
 function seenAt(){
   if (SEEN !== null) return SEEN;
   let prev = 0;
-  try { prev = Number(localStorage.getItem("zorca.seen")) || 0; } catch (e) {}
-  try { localStorage.setItem("zorca.seen", String(Math.floor(Date.now()/1000))); } catch (e) {}
+  try {
+    prev = Number(localStorage.getItem("zorca.seen")) || 0;
+    localStorage.setItem("zorca.seen", String(Math.floor(Date.now()/1000)));
+  } catch (e) {
+    // A private window or blocked site data. The feed still works; the NEW
+    // marks and every trend baseline silently do not, so say so rather than
+    // let "no baseline yet" look like a fresh install forever.
+    STORAGE_ERR = e && e.message ? e.message : "blocked";
+  }
   SEEN = prev;
   return SEEN;
 }
@@ -655,7 +1747,23 @@ function renderFeed(s){
     mark === 0 ? "first look on this browser - showing the latest"
     : fresh === 0 ? "nothing new since " + new Date(mark*1000).toLocaleTimeString()
     : fresh + " new since " + new Date(mark*1000).toLocaleTimeString();
-  const show = all.slice(0, window.innerWidth <= 720 ? 4 : 6);
+  // Three on a phone, not four. The stat cells grew when every one of them
+  // started naming its source, and the action list must stay above the fold
+  // (milestone 4). The feed is context; the decisions are the point.
+  // On a phone the feed is prose, and prose above the action list is
+  // reading cost. The COUNT stays visible at the top - that is the stat -
+  // and the rows themselves sit one tap down, which is where reading
+  // belongs. A laptop has the room, so it stays open there.
+  // The fold threshold is wider than the phone breakpoint on purpose: a
+  // 768-wide window has a laptop's layout and a phone's height budget, and
+  // six rows of prose put the action list under the fold there too.
+  const phone = window.innerWidth <= 900;
+  const el = document.getElementById("since");
+  if (el.dataset.userset !== "1") el.open = !phone;
+  // Four, not five. Pane titles are longer than repo basenames, which
+  // wrapped the action rows and pushed the first one to 919px against a
+  // 900px laptop fold. The feed is context; the decisions are the point.
+  const show = all.slice(0, 4);
   document.getElementById("feed").innerHTML = show.map(r => {
     const isNew = r.ts && r.ts > mark;
     const when = r.ts ? new Date(r.ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})
@@ -688,48 +1796,59 @@ function parseTs(v){
    blocked, and an unknown age sorts last rather than pretending to be new. */
 function actions(s){
   const out = [];
+  // A queued draft carries the pane's repo, which is empty for a lane with
+  // no worktree - one row rendered with no name at all. The pane knows.
+  const byHandle = {};
+  (s.panes || []).forEach(p => { if (p.handle) byHandle[p.handle] = p.label; });
+  const laneName = (repo, handle) =>
+    (repo && repo.trim()) || byHandle[handle] || "(unnamed lane)";
   (s.drafts || []).forEach(d => {
     const hit = danger((d.reason || "") + " " + (d.text || ""));
     out.push({
       tier: hit ? 0 : 3,
       tag: hit ? "IRREVERSIBLE" : "SEND",
-      who: d.repo,
+      who: laneName(d.repo, d.handle),
       why: hit ? "danger word: " + hit : (d.reason || "queued draft"),
       ts: d.ts || 0,
       text: d.text || "",
-      buttons: `<button onclick='sendDraft("${d.id}", this, ${hit ? "true" : "false"})'>Send</button>
-        <button onclick='post("/api/draft",{id:"${d.id}",action:"skip"}, this)'>Skip</button>`
+      buttons: `<button onclick='sendDraft(${js(d.id)}, this, ${hit ? "true" : "false"})'>Send</button>
+        <button onclick='post("/api/draft",{id:${js(d.id)},action:"skip"}, this)'>Skip</button>`
     });
   });
   (s.panes || []).filter(p => p.rank === 0).forEach(p => {
     out.push({
-      tier: 1, tag: "CONTEXT", who: p.repo,
+      tier: 1, tag: "CONTEXT", who: p.label || p.repo,
       why: p.ctx == null ? "context critical" : p.ctx + "% - hand off now",
       ts: 0, text: p.question || p.tail || "",
-      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+      buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
     });
   });
-  (s.gates || []).forEach(g => {
+  (s.gates || []).forEach((g, gi) => {
+    // The input's id is built from the loop index, not the gate id. An id
+    // has to survive being written into an attribute AND read back through
+    // getElementById inside another attribute, and the only value that
+    // reliably does that is one we chose ourselves.
+    const inputId = "gate-answer-" + gi;
     const opts = (g.options || []).map(o =>
-      `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:${JSON.stringify(o)}}, this)'>${esc(o)}</button>`).join("");
+      `<button onclick='post("/api/resolve",{id:${js(g.id)},resolution:${js(o)}}, this)'>${esc(o)}</button>`).join("");
     const close = (g.options || []).length === 0
-      ? `<button onclick='post("/api/resolve",{id:"${g.id}",resolution:"Closed by Zaal from ZORCA GUI: addressed, no further action."}, this)'>close - addressed</button>`
+      ? `<button onclick='post("/api/resolve",{id:${js(g.id)},resolution:${js("Closed by Zaal from ZORCA GUI: addressed, no further action.")}}, this)'>close - addressed</button>`
       : "";
     out.push({
       tier: 2, tag: "BLOCKED", who: "decision gate",
       why: "a lane is waiting on your call",
       ts: parseTs(g.created_at), text: g.question || "",
       buttons: opts + close +
-        `<input type="text" id="in-${g.id}" placeholder="or type an answer">
-         <button onclick='post("/api/resolve",{id:"${g.id}",
-           resolution:document.getElementById("in-${g.id}").value}, this)'>send</button>`
+        `<input type="text" id="${inputId}" placeholder="or type an answer">
+         <button onclick='post("/api/resolve",{id:${js(g.id)},
+           resolution:document.getElementById(${js(inputId)}).value}, this)'>send</button>`
     });
   });
   (s.panes || []).filter(p => p.rank === 1 || p.rank === 2).forEach(p => {
     out.push({
-      tier: 4, tag: "ASKED", who: p.repo, why: esc(p.state),
+      tier: 4, tag: "ASKED", who: p.label || p.repo, why: esc(p.state),
       ts: 0, text: p.question || p.tail || "",
-      buttons: `<button onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>open the pane</button>`
+      buttons: `<button onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>open the pane</button>`
     });
   });
   const LAST = 1e18;
@@ -754,14 +1873,346 @@ function actRow(a){
   </div>`;
 }
 
+/* A lane claiming to work with nothing landed since the claim began.
+   "held" is measured by zorca watching the state change, so a pane first
+   seen already working reports "at least" - a duration we did not observe
+   is never reported as one we did. */
+/* An ack says "I know about this one, as of then". It is a statement about
+   a moment, so the moment is always shown and goes stale on its own - an ack
+   that has quietly covered an item for nine days is a different thing from
+   one made this morning, and the row says which.
+
+   Keys embed the fact they describe, so acking "stuck since 14:02" does not
+   cover "stuck since 16:40" - a fresh claim makes a fresh key and the item
+   comes back unhandled. */
+function ackOf(s, key){
+  const at = (s.acks || {})[key];
+  return typeof at === "number" ? at : null;
+}
+function unhandled(s, rows){
+  return (rows || []).filter(r => !ackOf(s, r.key));
+}
+function ackBar(s, key){
+  const at = ackOf(s, key);
+  const k = attr(JSON.stringify(key));
+  if (!at) {
+    return `<div class="ackline"><button class="mini ack"
+      onclick='post("/api/ack",{key:${k},action:"ack"}, this)'
+      >I know about this</button></div>`;
+  }
+  const age = Date.now()/1000 - at;
+  const stale = age > (s.ack_stale_s || 604800);
+  return `<div class="ackline">acked <b class="${stale ? "stale" : ""}">${ago(age)} ago</b>` +
+    (stale ? " - and still here" : "") +
+    ` <button class="mini ack"
+      onclick='post("/api/ack",{key:${k},action:"unack"}, this)'>unack</button></div>`;
+}
+
+function renderStuck(s){
+  const all = (s.stuck || []).filter(r => hit(r.repo, r.state, r.last_text));
+  const rows = unhandled(s, all), ackedN = all.length - rows.length;
+  const ordered = rows.concat(all.filter(r => ackOf(s, r.key)));
+  const cand = s.stuck_candidates || 0, obs = s.stuck_observed || 0;
+  document.getElementById("stuckcount").innerHTML = rows.length === 0
+    ? (ackedN ? `nothing unhandled - ${ackedN} acked`
+       : cand === 0 ? "no lane is claiming to work"
+       : obs === 0
+         ? `nothing to report yet - none of the ${cand} working lane` +
+           `${cand === 1 ? " has" : "s have"} been watched long enough to judge`
+         : `nothing unhandled - all ${obs} lane${obs === 1 ? "" : "s"} watched ` +
+           `long enough ${obs === 1 ? "has" : "have"} landed something`)
+    : rows.length + " claiming to work with nothing landed"
+      + (ackedN ? ` &middot; ${ackedN} acked` : "");
+  document.getElementById("stuck").classList.toggle("clear", rows.length === 0);
+  document.getElementById("jams").innerHTML = ordered.map(r => `
+    <div class="jam${ackOf(s, r.key) ? " acked" : ""}">
+      <div class="jamline">
+        <span class="who">${esc(r.repo)}</span>
+        <span class="chip r${r.state === "working" ? 4 : 3}">${esc(r.state)}</span>
+        <span class="jamwhy">${r.assumed ? "at least " : ""}${ago(r.held)} with nothing landed</span>
+      </div>
+      <div class="jamlast">last commit ${ago(Date.now()/1000 - r.last_ts)} ago
+        &middot; ${esc(r.last_sha)} ${esc(r.last_text)}</div>
+      <span class="jamsrc">${esc(r.src)}${r.assumed
+        ? " - first seen already in this state, so the real duration may be longer" : ""}</span>
+      <div><button class="mini" onclick='post("/api/focus",{handle:${js(r.handle)}}, this)'
+        >open the pane</button></div>
+      ${ackBar(s, r.key)}
+    </div>`).join("");
+}
+
+/* An IN-FLIGHT row whose lane has no live pane. Not tappable: there is no
+   pane to focus and no safe edit to offer - the fix is a human closing the
+   row, and a button that pretended otherwise would be lying about what it
+   does. */
+function renderOrphans(s){
+  const shown = (s.orphans || []).filter(r => hit(r.lane, r.doing));
+  const total = FILTER ? shown.length : (s.orphan_total || 0);
+  const live = unhandled(s, shown), ackedN = shown.length - live.length;
+  const rows = live.concat(shown.filter(r => ackOf(s, r.key)));
+  document.getElementById("orphcount").innerHTML = total === 0
+    ? "none - every IN-FLIGHT row has a live lane"
+    : (total - ackedN) + " unhandled of " + total
+      + " row" + (total === 1 ? "" : "s") + " claimed by a lane that is not running"
+      + (total > shown.length ? ", oldest " + shown.length + " shown" : "")
+      + (ackedN ? ` &middot; ${ackedN} acked here` : "");
+  document.getElementById("orphsrc").textContent = total === 0 ? "" :
+    "~/zao-vault/handoffs/IN-FLIGHT.md, newest row per lane. A lane counts as "
+    + "live when its name and a pane's repo or worktree name contain one "
+    + "another on their alphanumerics - fuzzy on purpose, because fractal "
+    + "runs in ZAOfractal. Rows that say the lane closed are excluded.";
+  document.getElementById("orphans").innerHTML = rows.map(r => `
+    <div class="jam orph${ackOf(s, r.key) ? " acked" : ""}">
+      <div class="jamline">
+        <span class="who">${esc(r.lane)}</span>
+        <span class="orphage">${r.age_days === null
+          ? "date unreadable - shown anyway"
+          : r.age_days + "d since it was claimed"}</span>
+      </div>
+      <div class="jamlast">${esc(r.doing)}</div>
+      <span class="jamsrc">${esc(r.src)}</span>
+      ${ackBar(s, r.key)}
+    </div>`).join("");
+}
+
+/* Trend against the reading from before your last look.
+
+   Four outcomes and they are not collapsed: no baseline at all (first look
+   on this browser), no reading old enough to compare against, an equal
+   reading (no change), or a real delta. A single reading never produces a
+   direction - if nothing was observed at or before the last-look mark there
+   is no arrow, because one number is a value, not a trend. */
+const TREND_META = {
+  lanes_waiting: { cell: "lanes",          of: "waiting",   goodUp: false },
+  ahead_total:   { cell: "not on main",    of: "off main",  goodUp: false },
+  unlanded_days: { cell: "oldest unlanded", of: "days stranded", goodUp: false },
+  grill_outstanding: { cell: "grill", of: "outstanding", goodUp: false },
+  tasks_done:    { cell: "tasks",          of: "done",      goodUp: true  },
+  ctx_critical:  { cell: "ctx critical",   of: "ctx-critical", goodUp: false },
+  estate_risk:   { cell: "estate at risk", of: "at risk",   goodUp: false },
+  drafts_queued: { cell: "oldest draft",   of: "queued",    goodUp: false },
+};
+
+function baselineFor(hist, key, mark){
+  if (!mark) return { why: "no baseline yet - first look here" };
+  const usable = (hist || []).filter(h =>
+    h && h.ts <= mark && h.v && h.v[key] !== null && h.v[key] !== undefined);
+  if (!usable.length) {
+    return { why: (hist || []).length
+      ? "no reading before your last look"
+      : "no observations yet" };
+  }
+  return { sample: usable[usable.length - 1] };
+}
+
+function trendSpan(key, current, s){
+  const meta = TREND_META[key];
+  if (current === null || current === undefined) {
+    return `<span class="trend"><span class="none">not measured this refresh</span></span>`;
+  }
+  const b = baselineFor(s.trend, key, seenAt());
+  if (b.why) return `<span class="trend"><span class="none">${esc(b.why)}</span></span>`;
+  const was = b.sample.v[key];
+  const at = new Date(b.sample.ts * 1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  if (was === current) {
+    return `<span class="trend"><span class="none">${meta.of} unchanged since ${at}</span></span>`;
+  }
+  const d = current - was;
+  const better = meta.goodUp ? d > 0 : d < 0;
+  return `<span class="trend"><b class="${better ? "good" : "bad"}">` +
+    `${d > 0 ? "+" : ""}${d}</b> ${esc(meta.of)} since ${at}</span>`;
+}
+
+/* How long the oldest queued draft has waited for a tap. "none queued" and
+   "we could not read the queue" are different answers and stay different. */
+function draftsCell(s){
+  const d = s.drafts_age;
+  if (!d || d.state === "unreadable") {
+    return ["oldest draft", "~/.zao/orca-drafts.json unreadable",
+            `<b class="bad">unknown</b>`, "drafts_queued"];
+  }
+  if (!d.count) {
+    return ["oldest draft", "~/.zao/orca-drafts.json",
+            `<b class="nil">none queued</b>`, "drafts_queued"];
+  }
+  const undated = d.undated
+    ? ` &middot; <b class="bad">${d.undated}</b> undated` : "";
+  if (!d.oldest) {
+    return ["oldest draft", "~/.zao/orca-drafts.json",
+            `<b class="bad">age unknown</b> &middot; <b>${d.count}</b> queued`,
+            "drafts_queued"];
+  }
+  const age = Date.now()/1000 - d.oldest;
+  const cls = age > 21600 ? "bad" : age > 3600 ? "flag" : "good";
+  return ["oldest draft", "~/.zao/orca-drafts.json",
+          `<b class="${cls}">${ago(age)}</b> waiting &middot; ` +
+          `<b>${d.count}</b> queued${undated}`, "drafts_queued",
+          [age > 21600 ? ["bad", "draft waiting " + ago(age)] : null,
+           d.undated ? ["bad", d.undated + " drafts undated"] : null]];
+}
+
+/* The grill depth, and whether it is actually stuck.
+
+   Two ages, because they fail differently. cache_age is how long since
+   zao-status-refresh wrote this file - if that is large the number is a
+   fossil and nothing below it means anything. state_age is how long since
+   the grill's own state moved on the VPS - if THAT is large the grill has
+   stopped sending, which is the jam rather than a measurement problem. A
+   surface that reported one age would call a dead refresher a jam, or a
+   real jam fresh. */
+function grillCell(s){
+  const g = s.grill;
+  const src = "~/.zao/status.json";
+  if (!g || g.state !== "ok") {
+    return ["grill", src + " unreadable",
+            `<b class="bad">unknown</b>`, "grill_outstanding",
+            [["bad", "grill unreadable"]]];
+  }
+  if (g.cache_age !== null && g.cache_age > 300) {
+    // Refuse to render a depth from a refresher that has stopped.
+    return ["grill", src + ", written by zao-status-refresh",
+            `<b class="bad">stale ${ago(g.cache_age)}</b> - refresher stopped`,
+            "grill_outstanding", [["bad", "grill reading stale " + ago(g.cache_age)]]];
+  }
+  if (g.outstanding === null) {
+    return ["grill", src, `<b class="bad">depth unknown</b>` +
+      (g.queued !== null ? ` &middot; <b>${g.queued}</b> queued` : ""),
+      "grill_outstanding"];
+  }
+  const ceil = g.ceiling || 200;
+  const jam = g.outstanding >= ceil;
+  const near = !jam && g.outstanding >= ceil * 0.8;
+  const cls = jam ? "bad" : near ? "flag" : "good";
+  const quiet = (g.state_age !== null && g.state_age >= 3600)
+    ? ` &middot; <b class="bad">silent ${ago(g.state_age)}</b>` : "";
+  return ["grill", src,
+    `<b class="${cls}">${g.outstanding}/${ceil}</b>${jam ? " JAMMED" : near ? " nearing" : ""}` +
+    (g.queued !== null && g.queued !== g.outstanding
+      ? ` &middot; <b class="nil">${g.queued}</b> queued` : "") + quiet,
+    "grill_outstanding",
+    [jam ? ["bad", "grill JAMMED " + g.outstanding + "/" + ceil]
+     : near ? ["flag", "grill " + g.outstanding + "/" + ceil] : null,
+     (g.state_age !== null && g.state_age >= 3600)
+       ? ["bad", "grill silent " + ago(g.state_age)] : null]];
+}
+
+/* How long the oldest thing off main has been sitting there. `not on main`
+   counts commits; 66 landed this morning and 3 stranded since July read the
+   same there and do not read the same here. */
+function unlandedCell(s){
+  const e = s.estate;
+  const src = "git log <base>..HEAD, last line";
+  if (!e) {
+    return ["oldest unlanded", "no worktree could be read",
+            `<b class="bad">unknown</b>`, "unlanded_days"];
+  }
+  const unm = e.age_unmeasurable
+    ? ` &middot; <b class="bad">${e.age_unmeasurable}</b> age unreadable` : "";
+  if (!e.ahead_total) {
+    return ["oldest unlanded", src, `<b class="nil">nothing off main</b>`,
+            "unlanded_days"];
+  }
+  if (!e.oldest_unlanded) {
+    return ["oldest unlanded", src,
+            `<b class="bad">age unknown</b>${unm}`, "unlanded_days"];
+  }
+  // The headline age is the oldest thing NOT yet accounted for. Acking the
+  // 58-day branch you parked on purpose promotes the next real one instead
+  // of hiding the whole surface.
+  const live = unhandled(s, e.ahead).filter(a => a.oldest);
+  const pick = live.length ? live[0] : null;
+  const acked = (e.ahead || []).length - unhandled(s, e.ahead).length;
+  if (!pick) {
+    return ["oldest unlanded", src,
+      `<b class="nil">nothing unacked</b>` +
+      (acked ? ` &middot; <b class="nil">${acked}</b> acked` : "") + unm,
+      "unlanded_days"];
+  }
+  const age = Date.now()/1000 - pick.oldest;
+  const cls = age > 14*86400 ? "bad" : age > 3*86400 ? "flag" : "good";
+  const note = acked ? ` <span class="none">(oldest unacked)</span>` : "";
+  return ["oldest unlanded", src,
+          `<b class="${cls}">${ago(age)}</b> &middot; ${esc(pick.repo)}${note}${unm}`,
+          "unlanded_days",
+          [age > 14*86400 ? ["bad", "unlanded " + ago(age) + " " + pick.repo] : null]];
+}
+
+/* Work that has not reached main. Different question from `unpushed`: a
+   branch pushed to origin is zero unpushed and still ahead of main, which is
+   exactly the lane that commits steadily onto something that never lands. */
+function aheadCell(s){
+  const e = s.estate;
+  if (!e) {
+    return ["not on main", "no worktree could be read",
+            `<b class="bad">unknown</b>`, "ahead_total"];
+  }
+  const unm = e.ahead_unmeasurable
+    ? ` &middot; <b class="bad">${e.ahead_unmeasurable}</b> no main found` : "";
+  if (!e.ahead_total) {
+    return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
+            `<b class="nil">0</b> commits off main${unm}`, "ahead_total"];
+  }
+  const ackedN = (e.ahead || []).length - unhandled(s, e.ahead).length;
+  return ["not on main", `rev-list origin/HEAD..HEAD, ${e.checked} worktrees`,
+          `<b class="flag">${e.ahead_total}</b> commits across ` +
+          `<b>${e.ahead_repos}</b> lane${e.ahead_repos === 1 ? "" : "s"}${unm}` +
+          (ackedN ? ` &middot; <b class="nil">${ackedN}</b> acked` : ""),
+          "ahead_total"];
+}
+
+/* Work at risk across the live worktrees. Never a reassuring zero when the
+   measurement failed - `unknown` is a real answer and a guessed 0 is not. */
+function estateCell(s){
+  const e = s.estate;
+  if (!e) {
+    return ["estate at risk", "no worktree could be read",
+            `<b class="bad">unknown</b>`, "estate_risk",
+            [["bad", "estate unreadable"]]];
+  }
+  const bit = (n, label, cls) =>
+    `<b class="${n ? cls : "nil"}">${n}</b> ${label}`;
+  const v = [bit(e.dirty, "dirty", "bad"),
+             bit(e.unpushed, "unpushed", "flag"),
+             bit(e.noremote, "no remote", "bad")]
+            .join(" &middot; ")
+            + (e.unmeasured ? ` &middot; <b class="bad">${e.unmeasured}</b> unreadable` : "");
+  // `dirty` is chronic on a working estate and would sit in the summary
+  // permanently. Only the two that mean "this exists nowhere else" or "we
+  // could not look" get to interrupt.
+  return ["estate at risk", `git status, ${e.checked} live worktrees`, v,
+          "estate_risk",
+          [e.noremote ? ["bad", e.noremote + " on no remote"] : null,
+           e.unmeasured ? ["bad", e.unmeasured + " repos unreadable"] : null]];
+}
+
 /* The fleet, four numbers wide. A zero that should be zero renders dim; a
    number that means something is wrong renders warn or gold, so the strip
    is scannable without reading it. */
 function strip(s){
-  const P = s.panes || [], T = s.tasks || [];
+  const P = s.panes || [], TC = s.task_counts || null;
   const n = r => P.filter(p => p.rank === r).length;
-  const st = x => T.filter(t => t.status === x).length;
+  const st = x => (TC && TC[x]) || 0;
   const critical = n(0), idle = n(5), blocked = st("blocked") + st("failed");
+  const stuckAll = s.stuck || [];
+  const stuck = unhandled(s, stuckAll).length;
+  const stuckAcked = stuckAll.length - stuck;
+  const e0 = s.estate, d0 = s.drafts_age;
+  const trendNow = {
+    lanes_waiting: P.length ? n(3) : null,
+    tasks_done: TC ? st("completed") : null,
+    ctx_critical: P.length ? n(0) : null,
+    estate_risk: e0 ? e0.dirty + e0.unpushed + e0.noremote : null,
+    drafts_queued: (d0 && d0.count !== null && d0.count !== undefined) ? d0.count : null,
+    // Added in cycles 5, 6 and 10 server-side and never mirrored here, so
+    // these three rendered "not measured this refresh" forever even while
+    // the server was recording them. Found by a cold-start pass.
+    ahead_total: e0 ? e0.ahead_total : null,
+    unlanded_days: (e0 && e0.oldest_unlanded)
+      ? Math.floor((Date.now()/1000 - e0.oldest_unlanded) / 86400) : null,
+    grill_outstanding: (s.grill && s.grill.state === "ok"
+      && s.grill.outstanding !== null && s.grill.outstanding !== undefined)
+      ? s.grill.outstanding : null,
+  };
   let wcls = "good", wtxt = "-";
   if (!s.watcher_alive) { wcls = "bad"; wtxt = "DOWN"; }
   else if (!s.watcher_ts) { wcls = "flag"; wtxt = "no log yet"; }
@@ -771,18 +2222,72 @@ function strip(s){
     wcls = w > 300 ? "flag" : "good";
   }
   const cells = [
-    ["lanes", "orca-board --json", `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
+    ["lanes", stuck ? "orca-board + zorca-claims.json" : "orca-board --json",
+      `<b>${n(4)}</b> working &middot; <b>${n(3)}</b> waiting &middot; ` +
       `<b class="${idle ? "flag" : "nil"}">${idle}</b> idle &middot; ` +
-      `<b class="nil">${n(6)}</b> free`],
-    ["tasks", "orchestration.db (read-only)", `<b class="good">${st("completed")}</b> done &middot; ` +
+      `<b class="nil">${n(6)}</b> free` +
+      (stuck ? ` &middot; <b class="bad">${stuck}</b> STUCK` : "") +
+      (stuckAcked ? ` &middot; <b class="nil">${stuckAcked}</b> acked` : ""),
+      "lanes_waiting",
+      [stuck ? ["bad", stuck + " stuck"] : null,
+       idle ? ["flag", idle + " idle"] : null]],
+    ["tasks", "orchestration.db", `<b class="good">${st("completed")}</b> done &middot; ` +
       `<b class="flag">${st("ready")}</b> ready &middot; ` +
-      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`],
-    ["ctx critical", "orca-board --json, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
-      (critical ? " needs a handoff" : " - none near full")],
-    ["watcher", "~/.zao/orca-board.log + pgrep", `<b class="${wcls}">${wtxt}</b>`]
+      `<b class="${blocked ? "bad" : "nil"}">${blocked}</b> blocked`, "tasks_done",
+      [blocked ? ["bad", blocked + " tasks blocked"] : null]],
+    ["ctx critical", "orca-board, rank 0", `<b class="${critical ? "bad" : "nil"}">${critical}</b>` +
+      (critical ? " needs a handoff" : " - none near full"), "ctx_critical",
+      [critical ? ["bad", critical + " ctx-critical"] : null]],
+    ["watcher", "~/.zao/orca-board.log", `<b class="${wcls}">${wtxt}</b>`, null,
+      [wcls === "bad" ? ["bad", "watcher " + wtxt]
+       : wcls === "flag" ? ["flag", "watcher quiet " + wtxt] : null]],
+    estateCell(s),
+    draftsCell(s),
+    aheadCell(s),
+    unlandedCell(s),
+    grillCell(s)
   ];
-  document.getElementById("strip").innerHTML = cells.map(([k, src, v]) =>
+  // Nine readings do not fit above the action list on a 390px phone, and
+  // the action list is the point. So the phone gets the SUMMARY - only the
+  // stats that are not healthy, which is what a glance is for - and the
+  // nine cells, their sources and their trends sit one tap down. A laptop
+  // has the room and keeps them open.
+  // Built from what each cell DECLARES is wrong, not from scanning its
+  // markup for a colour class - the first attempt did that and reported
+  // "tasks 20 done" as a problem, because a healthy cell still contains a
+  // coloured number.
+  const notable = [];
+  cells.forEach(c => (c[4] || []).forEach(a => {
+    if (a) notable.push(`<span class="${a[0]}">${esc(a[1])}</span>`);
+  }));
+  // The refresh-cost tripwire, with the thresholds named rather than left
+  // to judgement. The loop ticks every 20s, so a refresh past 10s means the
+  // board is scraping more than half the time and the cycle has started to
+  // matter - which it does not today at 4.1s. 5s for a single stage names
+  // the culprit rather than just the total. Measured 2026-08-26: board
+  // 2.87s, estate 0.76s, everything else under 0.25s.
+  (s.problems || []).forEach(pr => {
+    notable.push(`<span class="bad">${esc(pr.where)} failing</span>`);
+  });
+  if (STORAGE_ERR) {
+    notable.push(`<span class="bad">browser storage blocked</span>`);
+  }
+  const T = s.timings || {};
+  if (s.refresh_secs > 10) {
+    notable.push(`<span class="bad">refresh ${s.refresh_secs}s (over 10s)</span>`);
+  }
+  Object.keys(T).filter(k => T[k] > 5).forEach(k => {
+    notable.push(`<span class="bad">${esc(k)} stage ${T[k]}s (over 5s)</span>`);
+  });
+  document.getElementById("stripsummary").innerHTML = notable.length
+    ? notable.join(" &middot; ")
+    : `<span class="ok">nothing wrong in ${cells.length} readings</span>`;
+  const sf = document.getElementById("stripfold");
+  if (sf.dataset.userset !== "1") sf.open = window.innerWidth > 900;
+  document.getElementById("strip").innerHTML = cells.map(([k, src, v, tk]) =>
     `<div class="cell"><span class="k">${k}</span><span class="v">${v}</span>` +
+    (tk ? trendSpan(tk, trendNow[tk], s)
+        : `<span class="trend"><span class="none">no trend - freshness, not a stock</span></span>`) +
     `<span class="src">${esc(src)}</span></div>`).join("");
 }
 
@@ -814,7 +2319,11 @@ function sendDraft(id, el, held){
 function ago(sec){
   if (sec < 90) return Math.round(sec) + "s";
   if (sec < 5400) return Math.round(sec/60) + "m";
-  return (sec/3600).toFixed(1) + "h";
+  if (sec < 172800) return (sec/3600).toFixed(1) + "h";
+  // Past two days, hours stop being readable - "1403.4h" is a number nobody
+  // converts in their head. Found rendering a 58-day-old unlanded commit.
+  if (sec < 5184000) return Math.round(sec/86400) + "d";
+  return (sec/2592000).toFixed(1) + "mo";
 }
 function freshness(s){
   const at = new Date(s.ts*1000).toLocaleTimeString();
@@ -822,30 +2331,131 @@ function freshness(s){
   let cls = "fresh", txt = "live";
   if (age >= 45) { cls = "aging"; txt = "as of " + at; }
   if (age > 90) { cls = "stale"; txt = "STALE " + ago(age) + " - refresher may be dead"; }
-  if (s.err) { cls = "stale"; txt = "STALE - " + s.err; }
+  if (s.err) {
+    cls = "stale";
+    // err_ts was in the payload from the start and nothing read it, so a
+    // failing refresher never said HOW LONG it had been failing - which is
+    // the difference between a blip and an outage. Found by a field audit.
+    const since = s.err_ts
+      ? " (since " + new Date(s.err_ts*1000).toLocaleTimeString() + ")" : "";
+    txt = "STALE" + since + " - " + s.err;
+  }
   document.getElementById("freshness").innerHTML =
     `<span class="${cls}">${esc(txt)}</span>` +
     (cls === "fresh" ? `<span class="at">${esc(at)}</span>` : "");
   document.getElementById("head").classList.toggle("warn", cls === "stale");
 }
 
+/* What a lane has DONE, beside what it is saying. `held` comes from zorca
+   watching the state change, so a pane first seen already in this state
+   reports "at least" rather than a duration nobody measured - same rule as
+   the stuck surface. */
+function workLine(p){
+  const bits = [];
+  if (p.purpose) {
+    bits.push(`<span class="purpose">${esc(p.purpose.slice(0, 110))}</span>` +
+              `<span class="none"> (IN-FLIGHT ${esc(p.purpose_lane)}, ${esc(p.purpose_when)})</span>`);
+  }
+  if (p.held != null) {
+    bits.push(`<span class="none">${p.held_assumed ? "at least " : ""}` +
+              `${ago(p.held)} in this state</span>`);
+  }
+  if (p.last_ts) {
+    const age = Date.now()/1000 - p.last_ts;
+    const cls = age > 6*3600 ? "flag" : "good";
+    bits.push(`<span class="${cls}">landed ${ago(age)} ago</span> ` +
+              `<span class="none">${esc(p.last_sha)} ${esc((p.last_text || "").slice(0, 46))}</span>`);
+  } else if (p.cwd_missing !== undefined || p.last_sha === "") {
+    bits.push(`<span class="none">no commit readable in this worktree</span>`);
+  }
+  return bits.length
+    ? `<div class="worked">${bits.join(" &middot; ")}</div>` : "";
+}
+
 /* A pane row. The state string is always rendered as text - the chip colour
    is the redundant channel, never the only one. */
-function paneRow(p, dup){
+function paneRow(p, dup, showWork){
   const hot = p.ctx != null && p.ctx >= 85;
   const ctx = p.ctx == null ? "-"
             : (hot ? p.ctx + "% - hand off" : p.ctx + "%");
-  return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:"${p.handle}"}, this)'>
-      <span class="repo">${esc(p.repo)}</span>
+  const label = p.label || p.repo || "(unnamed lane)";
+  const sub = (p.repo && p.repo !== label) ? p.repo : "";
+  return `<div class="card pane${dup ? " dup" : ""}" onclick='post("/api/focus",{handle:${js(p.handle)}}, this)'>
+      <span class="repo">${esc(label)}${sub
+        ? `<span class="inrepo"> ${esc(sub)}</span>` : ""}</span>
       <span class="chip r${p.rank}">${esc(p.state)}</span>
       <span class="ctx${hot ? " hot" : ""}">${ctx}</span>
       <span class="detail">${esc(p.question || p.tail || "")}</span>
+      ${showWork ? workLine(p) : ""}
     </div>`;
 }
 
+/* Before the first scrape lands, every count is a default and not a
+   reading. Rendering them produced "0 NEED YOU - the wall is working" and
+   "nothing stuck" on a board that had measured nothing - the same silent
+   failure SPEC 2420 section 2 was written to kill, arriving at boot instead
+   of at refresher death. Found by a cold-start pass, not by reading. */
+function unmeasured(){
+  const say = (id, txt) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  };
+  say("needcount", "NOT MEASURED YET");
+  say("needsub", "the first scrape takes about a minute - this is not a count of zero");
+  say("stripsummary", "nothing measured yet");
+  say("sincecount", "nothing read yet");
+  say("wallsummary", "not measured yet");
+  say("stuckcount", "not measured yet");
+  say("orphcount", "not measured yet");
+  say("refreshcost", "no refresh has completed yet");
+  say("problems", "not measured yet");
+  say("undeclared", "not measured yet");
+  say("archive", "not measured yet");
+  document.getElementById("needbtn").classList.remove("clear");
+  document.getElementById("needsyou").classList.remove("clear");
+  document.getElementById("stuck").classList.remove("clear");
+  ["actions", "feed", "jams", "orphans", "panes", "strip"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<div class="card">not measured yet</div>';
+  });
+  document.getElementById("freshness").innerHTML =
+    '<span class="stale">no reading yet - waiting for the first scrape</span>';
+  document.getElementById("head").classList.add("warn");
+}
+
+/* The last payload, kept so typing in the filter redraws from what is
+   already here instead of refetching on every keystroke. */
+let LAST = null;
+
 async function load(){
-  const s = await (await fetch("/api/state")).json();
+  let s;
+  try {
+    s = await (await fetch("/api/state")).json();
+  } catch (e) {
+    document.getElementById("freshness").innerHTML =
+      '<span class="stale">cannot reach the board - ' + esc(e.message) + '</span>';
+    document.getElementById("head").classList.add("warn");
+    return;
+  }
+  LAST = s;
+  try {
+    render(s);
+  } catch (e) {
+    // A render that throws leaves the last good frame on screen, which is
+    // a stale board that looks live - the same lie a dead refresher tells.
+    // Say it instead. Found the hard way: a temporal-dead-zone error in the
+    // filter status line stopped every update and showed nothing at all.
+    document.getElementById("freshness").innerHTML =
+      '<span class="stale">RENDER FAILED - what you are seeing is stale - '
+      + esc(e.message) + '</span>';
+    document.getElementById("head").classList.add("warn");
+    throw e;
+  }
+}
+
+function render(s){
   document.getElementById("run").textContent = s.run;
+  if (!s.ts) { unmeasured(); return; }
   document.getElementById("runref").textContent = s.run;
   freshness(s);
 
@@ -853,6 +2463,7 @@ async function load(){
   const acts = actions(s);
   const need = acts.length;
   const urgent = acts.filter(a => a.tier <= 1).length;
+  const actsShown = acts.filter(a => hit(a.who, a.why, a.text, a.tag));
   document.getElementById("needcount").textContent =
     need === 0 ? "0 NEED YOU" : need + " NEED YOU";
   document.getElementById("needsub").textContent = need === 0
@@ -863,13 +2474,18 @@ async function load(){
   document.getElementById("needsyou").classList.toggle("clear", need === 0);
   strip(s);
   renderFeed(s);
-  document.getElementById("actions").innerHTML = acts.map(actRow).join("")
-    || '<div class="card">nothing needs you</div>';
+  document.getElementById("actions").innerHTML = actsShown.map(actRow).join("")
+    || `<div class="card">${FILTER
+        ? "no action matches " + esc(JSON.stringify(FILTER)) +
+          " - " + need + " hidden by the filter"
+        : "nothing needs you"}</div>`;
   trimToggles();
 
   /* --- rail 2: the wall. Free and finished lanes collapse into the
          summary; a card here means a lane that is actually running. --- */
-  const live = s.panes.filter(p => p.rank <= 4);
+  const liveAll = s.panes.filter(p => p.rank <= 4);
+  const live = liveAll.filter(p => hit(p.repo, p.label, p.state, p.tail,
+                                       p.question, p.last_text, p.cwd));
   const working = s.panes.filter(p => p.rank == 3 || p.rank == 4).length;
   const free = s.panes.filter(p => p.rank == 6).length;
   const idle = s.panes.filter(p => p.rank == 5).length;
@@ -877,32 +2493,274 @@ async function load(){
     `${working} working &middot; ${free} free &middot; ` +
     `<span class="${idle ? "idle" : ""}">${idle} idle</span>`;
   document.getElementById("panes").innerHTML =
-    live.map(p => paneRow(p, p.rank <= 2)).join("")
-    || '<div class="card">no live panes</div>';
+    live.map(p => paneRow(p, p.rank <= 2, true)).join("")
+    || `<div class="card">${FILTER
+        ? "no live lane matches " + esc(JSON.stringify(FILTER)) +
+          " - " + liveAll.length + " hidden by the filter"
+        : "no live panes"}</div>`;
+  // Placed here, after live/liveAll/actsShown exist. It sat above them
+  // first, and because it only reads them in the FILTER branch, render()
+  // threw a temporal-dead-zone ReferenceError exclusively when a filter was
+  // set - the page simply stopped updating and said nothing.
+  const fs = document.getElementById("filterstat");
+  if (!FILTER) {
+    fs.textContent = "";
+  } else {
+    const stuckAll = (s.stuck || []).length;
+    const stuckShown = (s.stuck || []).filter(r => hit(r.repo, r.state, r.last_text)).length;
+    fs.innerHTML =
+      `showing <b>${actsShown.length}</b> of ${need} actions &middot; ` +
+      `<b>${live.length}</b> of ${liveAll.length} live lanes &middot; ` +
+      `<b>${stuckShown}</b> of ${stuckAll} stuck &middot; ` +
+      `<span class="none">the count above is unfiltered on purpose</span>`;
+  }
+  // Derived from panes that are already in the payload - no new field, no
+  // extra bytes on the poll. The count in "Lane purpose matching" says how
+  // many; this says WHICH, with enough to identify the lane and decide
+  // whether it is worth a row.
+  //
+  // When IN-FLIGHT.md cannot be read, every pane looks undeclared. Listing
+  // all of them would be the dashboard inventing a problem out of its own
+  // blindness, so it says what it actually knows instead.
+  const declaredKnown = s.inflight_rows !== null && s.inflight_rows !== undefined;
+  const undeclared = declaredKnown
+    ? (s.panes || []).filter(p => (p.rank || 0) <= 4 && !p.purpose)
+    : [];
+  document.getElementById("undeclared").innerHTML = !declaredKnown
+    ? '<span class="stamp">cannot tell - IN-FLIGHT.md could not be read this ' +
+      'refresh, so every lane would look undeclared</span>'
+    : (undeclared.length
+       ? undeclared.map(p => `
+          <div class="task">
+            <span class="chip r${p.rank}">${esc(p.state)}</span>
+            <span>${esc(p.label || p.repo || "(unnamed lane)")}</span>
+            <span class="stamp">${p.held != null
+              ? (p.held_assumed ? "at least " : "") + ago(p.held) + " in this state"
+              : "state age unknown"}${p.last_ts
+              ? " &middot; landed " + ago(Date.now()/1000 - p.last_ts) + " ago"
+              : " &middot; no commit readable"}</span>
+          </div>`).join("") +
+         `<div class="stamp" style="margin-top:7px">no IN-FLIGHT row names ` +
+         `these, so nothing outside their own pane says what they are for. ` +
+         `Writing the rows is a human's call - this surface only reports.</div>`
+       : '<span class="stamp">every live lane has an IN-FLIGHT row</span>');
+  // Paste-ready, never applied. zorca does not write IN-FLIGHT.md, and the
+  // block says so in its own header. It is behind a disclosure because it
+  // is the whole table - roughly 75 KB - and nobody needs that in the DOM
+  // until they are actually going to paste it.
+  const arch = s.archive;
+  const archEl = document.getElementById("archive");
+  if (!arch) {
+    archEl.innerHTML = '<span class="stamp">open this fold to load the proposal</span>';
+  } else if (arch.state !== "ok") {
+    archEl.innerHTML = '<span class="stamp">IN-FLIGHT.md could not be read, ' +
+      'so nothing can be proposed</span>';
+  } else if (!arch.marked) {
+    archEl.innerHTML = '<span class="stamp">no row is stale by ' +
+      arch.threshold_days + ' days or more - nothing to archive</span>';
+  } else {
+    archEl.innerHTML =
+      `<b class="flag">${arch.marked}</b> rows across <b>${arch.lanes}</b> lanes ` +
+      `have had no live pane for ${arch.threshold_days} days or more.` +
+      `<div class="stamp" style="margin:6px 0">Marked, not deleted - each row ` +
+      `keeps its lane, its text and its date. Generated from the file as it ` +
+      `stood at ${esc(arch.mtime)}; if it has changed since, reload and take a ` +
+      `fresh copy. zorca does not write this file.</div>` +
+      `<details><summary>show the paste-ready table (${Math.round(arch.text.length/1024)} KB)</summary>` +
+      `<pre>${esc(arch.text)}</pre></details>`;
+  }
+  const e = s.estate;
+  document.getElementById("aheadlist").innerHTML = !e
+    ? '<span class="stamp">no worktree could be read this refresh</span>'
+    : (((unhandled(s, e.ahead).concat((e.ahead || []).filter(a => ackOf(s, a.key))))).map(a => `
+        <div class="task ${ackOf(s, a.key) ? "acked" : ""}"
+          style="${ackOf(s, a.key) ? "opacity:.62" : ""}">
+          <span class="st flag">${a.n}</span>
+          <span>${esc(a.repo)}</span>
+          <span class="stamp">${a.oldest
+            ? "oldest " + ago(Date.now()/1000 - a.oldest) + " &middot; "
+            : "age unreadable &middot; "}ahead of ${esc(a.base)}</span>
+          ${ackBar(s, a.key)}</div>`).join("")
+       || '<span class="stamp">every live worktree is level with its default branch</span>')
+      + (e.ahead_unmeasurable
+         ? `<div class="stamp" style="margin-top:6px">${e.ahead_unmeasurable} `
+           + `worktree${e.ahead_unmeasurable === 1 ? "" : "s"} had no resolvable `
+           + `default branch - counted, not assumed level</div>` : "")
+      + (e.ahead_repos > (e.ahead || []).length
+         ? `<div class="stamp">${e.ahead_repos - e.ahead.length} more not listed</div>` : "");
+  // What the refresh actually costs, visible rather than assumed. This
+  // number is why cycle 15 did NOT parallelise the git work: the pane
+  // scrape is two thirds of it and the git stages are a fifth.
+  const probs = (s.problems || []).slice();
+  if (STORAGE_ERR) {
+    probs.push({where: "browser storage",
+                why: "localStorage is blocked here (" + STORAGE_ERR + ") - the " +
+                     "last-look mark and every trend baseline cannot be kept",
+                ts: Date.now()/1000});
+  }
+  const failing = probs.length
+    ? probs.map(pr => `<div style="margin-bottom:6px"><b class="bad">${esc(pr.where)}</b>` +
+        ` <span class="none">since ${new Date(pr.ts*1000).toLocaleTimeString()}</span>` +
+        `<br>${esc(pr.why)}</div>`).join("")
+    : "nothing is failing quietly - every read and write this refresh " +
+      "either succeeded or is named above";
+  // Unmatched lanes are a data gap, not a code failure, so they are reported
+  // here without being pushed into the fleet alert line - a channel that
+  // shouts about everything gets ignored like one that shouts about nothing.
+  // Both directions, because omitting either is the silent omission this
+  // block exists to end.
+  const unm = s.unmatched_panes, rowsN = s.inflight_rows;
+  const known = rowsN !== null && rowsN !== undefined
+    && unm !== null && unm !== undefined;
+  const matching = !known
+    ? `<b class="bad">IN-FLIGHT.md could not be read</b> - no lane purpose is ` +
+      `known, and the orphan list under Stuck is empty for that reason rather ` +
+      `than because there are none`
+    : `<b>${rowsN}</b> rows &middot; ` +
+      `<b class="${unm ? "flag" : "nil"}">${unm}</b> live lane${unm === 1 ? "" : "s"} ` +
+      `with no row - running without a stated purpose &middot; ` +
+      `<b class="${s.orphan_total ? "flag" : "nil"}">${s.orphan_total}</b> ` +
+      `row${s.orphan_total === 1 ? "" : "s"} with no live lane - listed under Stuck` +
+      `<br><span class="none">matched by containment on the alphanumerics of the ` +
+      `lane name and the repo or worktree name; fuzzy on purpose</span>`;
+  document.getElementById("problems").innerHTML = failing +
+    '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">' +
+    '<b>Lane purpose matching</b><br>' + matching + '</div>';
+  const T = s.timings || {};
+  const order = Object.keys(T).sort((a, b) => T[b] - T[a]);
+  document.getElementById("refreshcost").innerHTML = order.length
+    ? `last refresh <b>${s.refresh_secs}s</b> &middot; ` +
+      order.filter(k => T[k] > 0).map(k => `${esc(k)} ${T[k]}s`).join(" &middot; ") +
+      ` &middot; loop ticks every 20s` +
+      ` &middot; <span class="none">tripwire: total over 10s, or any stage over 5s,` +
+      ` raises an alert in the fleet line</span>`
+    : "not measured yet";
+  document.getElementById("provenance").innerHTML = [
+    ["lanes, ctx critical, the wall",
+     "python3 ~/bin/orca-board --json - one scrape per refresh, ~1s per pane"],
+    ["stuck lanes",
+     "orca-board state observed over time in ~/.zao/zorca-claims.json, against " +
+     "git -C &lt;worktree&gt; log -1. 45 min threshold, ZORCA_STALE_CLAIM_S."],
+    ["tasks",
+     "~/Library/Application Support/orca/orchestration.db, opened read-only " +
+     "(file: URI, mode=ro) with a busy timeout"],
+    ["watcher",
+     "mtime of ~/.zao/orca-board.log for the last write, plus pgrep -f " +
+     "'orca-board --auto' for whether it is alive. It has no heartbeat line, " +
+     "so neither fact alone can tell quiet from dead."],
+    ["grill", "~/.zao/status.json, written by ~/bin/zao-status-refresh, which " +
+      "SSHes the VPS - re-running that here would put an 8s network round trip " +
+      "inside a 20s loop for a number another process already keeps current. " +
+      "`outstanding` is the 12h-windowed count the gate compares against the " +
+      "ceiling; `queued` is every card ever asked and unanswered. They were " +
+      "conflated until zaal-dotfiles a979b96. Two ages are read: since the " +
+      "cache was written (a fossil if large) and since the grill's own state " +
+      "moved on the VPS (the jam itself if large)."],
+    ["acknowledge marks", "POST /api/ack writes ~/.zao/zorca-acks.json and " +
+      "nothing else - it shells out to nothing and sends nothing to any pane. " +
+      "Counts on stuck, orphans and unlanded read UNHANDLED; the raw totals " +
+      "stay raw, because those are measurements of the estate rather than a " +
+      "queue, and the trend lines follow the raw measurement so an ack can " +
+      "never manufacture a direction. Keys embed the fact - a fresh claim or " +
+      "a new oldest commit makes a new key and the item returns unhandled. An " +
+      "ack older than 7 days renders stale."],
+    ["oldest unlanded", e
+      ? "the LAST line of git log &lt;base&gt;..HEAD --format=%ct per worktree. " +
+        "Not git log -1, which returns the NEWEST commit in the range - that " +
+        "answers when a lane last committed, which two other surfaces already " +
+        "answer. Lanes are listed oldest-first, because 3 commits stranded for " +
+        "a month matter more than 66 from this morning. A count that reads " +
+        "with an unreadable log is counted age-unreadable, not aged zero."
+      : "nothing could be read this refresh"],
+    ["not on main", e
+      ? "git rev-list --count &lt;base&gt;..HEAD per live worktree, where base is " +
+        "the first of origin/HEAD, origin/main, origin/master, main, master " +
+        "that resolves. Different from unpushed: a branch pushed to origin is " +
+        "zero unpushed and still ahead of main. A worktree whose default " +
+        "branch cannot be resolved is counted, never assumed level."
+      : "nothing could be read this refresh"],
+    ["estate at risk", e
+      ? "git status --porcelain and git rev-list --count @{u}..HEAD across the " +
+        (e.checked) + " live worktrees on the board - not the full 48-clone " +
+        "estate, which would cost more than it tells you every 20s" +
+        (e.full_swept ? ". Full estate last swept " + e.full_swept + " per " +
+          esc(e.note) : ". No full-sweep date found in " + esc(e.note))
+      : "nothing could be read this refresh - the cell says unknown rather " +
+        "than a reassuring zero"],
+    ["gates, drafts, oldest draft",
+     "orca orchestration gate-list --json, and ~/.zao/orca-drafts.json read " +
+     "directly rather than through queue_read(), which returns [] on failure " +
+     "and cannot tell an empty queue from an unreadable one. A draft with no " +
+     "usable ts is counted undated, never assumed fresh."],
+    ["since you last looked",
+     "~/zao-vault/daily/&lt;today&gt;.md headings, and git -C &lt;worktree&gt; log -1 " +
+     "per live pane. NEW marks come from localStorage on this browser only."],
+    ["claims outliving their lane",
+     "~/zao-vault/handoffs/IN-FLIGHT.md, newest row per lane"],
+  ].map(([k, v]) => `<div style="margin-bottom:8px"><b>${k}</b><br>${v}</div>`).join("");
+  renderStuck(s);
+  renderOrphans(s);
   document.getElementById("coldpanes").innerHTML =
     s.panes.filter(p => p.rank >= 5).map(paneRow).join("")
     || '<span class="stamp">none</span>';
 
   /* --- rail 3: reference ------------------------------------------- */
-  document.getElementById("tasks").innerHTML = s.tasks.map((t,i) => `
+  // Lanes and the watcher trail ride along in the poll - they are small,
+  // and the lane list is how a parked lane gets reopened. Tasks and
+  // resolved gates are 26 KB and are fetched only when the fold opens.
+  foldCheap(s);
+  loadDetail(false);
+}
+
+/* The reference fold's own data, fetched when it opens rather than pushed
+   on every poll. Closed is the default, so most sessions never pay for it. */
+let DETAIL = null;
+async function loadDetail(force){
+  const ref = document.getElementById("ref");
+  if (!ref.open) return;
+  if (DETAIL && !force) { detailRender(DETAIL.tasks, DETAIL.resolved); return; }
+  document.getElementById("tasks").innerHTML =
+    '<span class="stamp">loading...</span>';
+  try {
+    const d = await (await fetch("/api/state?detail=1")).json();
+    DETAIL = {tasks: d.tasks || [], resolved: d.resolved || [], archive: d.archive || null};
+    if (LAST) { LAST.archive = DETAIL.archive; render(LAST); return; }
+  } catch (e) {
+    document.getElementById("tasks").innerHTML =
+      '<span class="stamp">could not load the detail - ' + esc(e.message) + '</span>';
+    return;
+  }
+  detailRender(DETAIL.tasks, DETAIL.resolved);
+}
+
+function detailRender(tasks, resolved){
+  document.getElementById("tasks").innerHTML = tasks.map((t,i) => `
     <div class="task" style="cursor:pointer" onclick='
-      const el=document.getElementById("spec-"+${i});
+      const el=document.getElementById("spec-"+${Number(i)});
       el.style.display = el.style.display=="none" ? "block" : "none";'>
       <span class="st st-${t.status}">${t.status}</span>
       <span>${esc(t.title)}</span></div>
     <div id="spec-${i}" style="display:none" class="detail"
       ><div style="white-space:normal;padding:4px 0 10px 112px">
       ${esc(t.spec)}<br><span class="stamp">${t.id} &middot; ${esc(t.updated)}</span>
-      </div></div>`).join("");
-  document.getElementById("resolved").innerHTML = s.resolved.map(g => `
+      </div></div>`).join("") || '<span class="stamp">no tasks</span>';
+  document.getElementById("resolved").innerHTML = resolved.map(g => `
     <div class="task"><span class="st st-completed">resolved</span>
       <span>${esc(g.question.slice(0,70))} &rarr; <b>${esc(g.resolution||"")}</b></span>
     </div>`).join("") || '<span class="stamp">none yet</span>';
+}
+
+function foldCheap(s){
+  // A lane whose manifest row was refused shows the reason instead of a
+  // button. Rendering a button that always 400s would make the refusal look
+  // like a bug in the page rather than a fact about the row.
   document.getElementById("lanes").innerHTML = s.lanes.map((l,i) => `
-    <div class="task"><button class="mini"
-      onclick='post("/api/lane",{i:${i}}, this)'>open</button>
+    <div class="task">${l.bad
+      ? `<span class="st bad">refused</span>`
+      : `<button class="mini" onclick='post("/api/lane",{i:${Number(i)}}, this)'>open</button>`}
       <span>${esc(l.name)}</span>
-      <span class="stamp">${esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
+      <span class="stamp">${l.bad ? esc(l.bad)
+        : esc(l.worktree.replace(/^.*zaalpanthaki/,"~"))}</span>
     </div>`).join("") || '<span class="stamp">no parked lanes</span>';
   document.getElementById("wlog").innerHTML = s.log.map(l => {
     // The two-character prefix is the real signal; colour is the echo.
@@ -918,8 +2776,19 @@ async function load(){
    resolve a gate or send a draft. */
 document.addEventListener("keydown", e => {
   const a = document.activeElement;
+  // Escape still works from inside the filter box; everything else defers
+  // to whatever is being typed.
+  if (a && a.id === "filter" && e.key === "Escape") {
+    a.value = ""; setFilter(""); a.blur(); e.preventDefault(); return;
+  }
   if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "Escape" && FILTER) {
+    document.getElementById("filter").value = "";
+    setFilter("");
+    e.preventDefault();
+    return;
+  }
   if (e.key === "?") {
     const r = document.getElementById("ref");
     r.open = !r.open;
@@ -933,13 +2802,139 @@ document.addEventListener("keydown", e => {
     if (btn) { btn.focus(); e.preventDefault(); }
   }
 });
+// Once Zaal opens or closes the feed himself, stop overriding him.
+document.getElementById("since").addEventListener("toggle", function(){
+  this.dataset.userset = "1";
+});
+document.getElementById("stripfold").addEventListener("toggle", function(){
+  this.dataset.userset = "1";
+});
+// Opening the fold is what pays for its data. Re-opening refetches, so a
+// fold left open across a refresh does not show a frozen task list.
+document.getElementById("ref").addEventListener("toggle", function(){
+  if (this.open) loadDetail(true);
+});
 load(); setInterval(load, 15000);
 </script></body></html>"""
+
+
+# Per-path rate limits: (max requests, window seconds).
+#
+# Only these two. /api/resolve dedupes on the gate id and /api/draft drops
+# the item from the queue as it sends, so a wedged loop hitting either is
+# bounded by its own state. /api/focus is idempotent. These two are the
+# unbounded ones: an ack can be written forever, and a lane creates a
+# terminal that starts a PAID session every time.
+LIMITS = {
+    "/api/lane": (int(os.environ.get("ZORCA_LANE_MAX", "3")),
+                  int(os.environ.get("ZORCA_LANE_WINDOW", "300"))),
+    "/api/ack": (int(os.environ.get("ZORCA_ACK_MAX", "30")),
+                 int(os.environ.get("ZORCA_ACK_WINDOW", "60"))),
+}
+HITS = {}
+HITS_LOCK = threading.Lock()
+
+
+def rate_check(ip, path, now=None):
+    """(allowed, retry_after_seconds).
+
+    A sliding window rather than a counter that resets on the minute: a
+    reset boundary lets a loop fire the whole allowance twice back to back
+    and still look compliant.
+
+    Keyed per (ip, path). Everything here is 127.0.0.1 by design, so in
+    practice this is one bucket per endpoint - which is what is wanted, since
+    the thing being limited is a wedged loop on this machine, not a crowd.
+    """
+    limit = LIMITS.get(path)
+    if not limit:
+        return True, 0
+    cap, window = limit
+    now = now or time.time()
+    key = (ip, path)
+    with HITS_LOCK:
+        seen = [t for t in HITS.get(key, []) if now - t < window]
+        if len(seen) >= cap:
+            HITS[key] = seen
+            return False, max(1, int(window - (now - seen[0])) + 1)
+        seen.append(now)
+        HITS[key] = seen
+    return True, 0
+
+
+# Only these may appear as the Host or the Origin's hostname. Everything
+# else is either a cross-origin page in Zaal's browser or a DNS-rebind
+# pointing a hostile name at 127.0.0.1.
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def local_only(self):
+        """CORS blocks a cross-origin page from READING the reply. It does
+        not stop the request being SENT and acted on, and every /api POST
+        here acts on something - resolves a gate, sends a draft to a live
+        pane. So the request itself is refused, not just its response.
+
+        Three checks, because each covers a hole the others leave:
+          Host    - a DNS rebind resolves evil.example to 127.0.0.1 and the
+                    Origin then looks legitimate; the Host header does not.
+          Origin  - a browser always sends it on a cross-origin POST. It is
+                    absent for curl and for local scripts, and absence is
+                    allowed, because the attack this defends against is a
+                    page in a browser and that page cannot omit it.
+          Sec-Fetch-Site - belt to the Origin's braces where the browser
+                    sends it.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if host.startswith("["):
+            host = host.split("]")[0] + "]"
+        else:
+            host = host.rsplit(":", 1)[0] if ":" in host else host
+        if host not in LOCAL_HOSTS:
+            return False, "Host %r is not local" % host[:60]
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() != "null":
+            try:
+                hostname = urllib.parse.urlparse(origin).hostname or ""
+            except Exception:
+                hostname = ""
+            if hostname not in LOCAL_HOSTS:
+                return False, "Origin %r is cross-site" % origin[:60]
+        elif origin.lower() == "null":
+            # A sandboxed iframe or a data: URL. Nothing legitimate here
+            # sends that.
+            return False, "Origin null"
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "same-site", "none"):
+            return False, "Sec-Fetch-Site %r" % site[:40]
+        return True, ""
+
+    def guard(self):
+        ok, why = self.local_only()
+        if not ok:
+            self._send(403, json.dumps({"ok": False, "why": why}))
+        return ok
+
+    def rate_ok(self):
+        ip = (self.client_address or ["?"])[0]
+        allowed, retry = rate_check(ip, self.path)
+        if not allowed:
+            cap, window = LIMITS[self.path]
+            body = json.dumps({"ok": False, "retry_after": retry,
+                               "why": "rate limit: %d per %ds on %s - retry in %ds"
+                                      % (cap, window, self.path, retry)})
+            data = body.encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(retry))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return False
+        return True
 
     def _send(self, code, body, ctype="application/json"):
         data = body if isinstance(body, bytes) else body.encode()
@@ -950,15 +2945,33 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if not self.guard():
+            return
         if self.path == "/":
             self._send(200, PAGE, "text/html; charset=utf-8")
-        elif self.path == "/api/state":
+        elif self.path.split("?")[0] == "/api/state":
+            # `tasks` and `resolved` are 26 KB of the payload and render
+            # only inside the reference fold, which is closed by default.
+            # Sending them on every 15s poll ships data nobody is looking
+            # at; the counts the strip needs are two small numbers. The
+            # fold asks for the rest when it opens.
+            want = "detail=1" in self.path
             with LOCK:
-                self._send(200, json.dumps(CACHE))
+                if want:
+                    body = json.dumps(CACHE)
+                else:
+                    lean = {k: v for k, v in CACHE.items()
+                            if k not in ("tasks", "resolved", "archive")}
+                    body = json.dumps(lean)
+            self._send(200, body)
         else:
             self._send(404, "{}")
 
     def do_POST(self):
+        if not self.guard():
+            return
+        if not self.rate_ok():
+            return
         n = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(n) or "{}")
@@ -971,16 +2984,23 @@ class H(BaseHTTPRequestHandler):
                 if body["id"] in RESOLVED:
                     self._send(200, json.dumps({"ok": True, "dup": True}))
                     return
-            out = sh([ORCA, "orchestration", "gate-resolve", "--id", body["id"],
-                      "--resolution", body["resolution"], "--json"])
+            if not is_token(body["id"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad gate id"}))
+                return
+            out = sh([ORCA, "orchestration", "gate-resolve",
+                      flag("id", body["id"]),
+                      flag("resolution", body["resolution"]), "--json"])
             ok = '"ok": true' in out or '"ok":true' in out
             if ok:
                 with LOCK:
                     RESOLVED.add(body["id"])
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         elif self.path == "/api/focus" and body.get("handle"):
-            sh([ORCA, "terminal", "switch", "--terminal", body["handle"]])
+            if not is_token(body["handle"]):
+                self._send(400, json.dumps({"ok": False, "why": "bad handle"}))
+                return
+            sh([ORCA, "terminal", "switch", flag("terminal", body["handle"])])
             self._send(200, '{"ok": true}')
         elif self.path == "/api/lane" and body.get("i") is not None:
             lanes = load_lanes()
@@ -990,26 +3010,54 @@ class H(BaseHTTPRequestHandler):
                 # Zaal's tap: open an Orca pane in the lane's worktree and
                 # resume its Claude session. Spawns a paid session - which is
                 # exactly what the button says it does.
-                out = sh([ORCA, "terminal", "create", "--worktree",
-                          "path:" + l["worktree"], "--title", l["name"],
-                          "--command", l["cmd"], "--focus"], timeout=120)
+                if l.get("bad") or not l.get("cmd"):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": l.get("bad") or "no command"}))
+                    return
+                out = sh([ORCA, "terminal", "create",
+                          flag("worktree", "path:" + l["worktree"]),
+                          flag("title", l["name"]),
+                          flag("command", l["cmd"]), "--focus"], timeout=120)
                 ok = "Created terminal" in out
             except Exception:
                 pass
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
+        elif self.path == "/api/ack" and body.get("key"):
+            # SPEC 2420 put new mutation endpoints out of scope. That guard
+            # was about mutations that REACH ORCA - resolve, send, focus,
+            # create - which are irreversible and outward-facing. This one
+            # writes a single zorca-owned file, shells out to nothing, sends
+            # nothing to any pane, and is undone by tapping again. The
+            # alternative, localStorage, would give the phone and the laptop
+            # different counts for the same board, which is worse than the
+            # deviation.
+            with ACK_LOCK:
+                d = acks_read()
+                if body.get("action") == "unack":
+                    d.pop(body["key"], None)
+                else:
+                    d[body["key"]] = time.time()
+                acks_write(d)
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
+            self._send(200, json.dumps({"ok": True}))
         elif self.path == "/api/draft" and body.get("id"):
             item = next((i for i in queue_read() if i["id"] == body["id"]), None)
             ok = True
             if item and body.get("action") == "send":
                 # The human tapped Send - this is Zaal's keystroke, so no
                 # auto-draft prefix; it carries his authority.
-                out = sh([ORCA, "terminal", "send", "--terminal",
-                          item["handle"], "--text", item["text"], "--enter"])
+                if not is_token(item.get("handle")):
+                    self._send(400, json.dumps(
+                        {"ok": False, "why": "bad handle in the queue"}))
+                    return
+                out = sh([ORCA, "terminal", "send",
+                          flag("terminal", item["handle"]),
+                          flag("text", item["text"]), "--enter"])
                 ok = "Sent" in out
             if item:
                 queue_drop(body["id"])
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_coalesced, daemon=True).start()
             self._send(200 if ok else 500, json.dumps({"ok": ok}))
         else:
             self._send(400, '{"ok": false}')
