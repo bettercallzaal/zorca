@@ -2,7 +2,7 @@
 type: playbook
 status: active
 created: 2026-08-25
-updated: 2026-08-25
+updated: 2026-09-01
 tags: [orca, orchestration, workflow]
 source: manual
 confidence: high
@@ -50,6 +50,99 @@ copies) + orchestration dispatch -> lane reports -> coordinator verifies ->
 orchestrator writes the vault record. One writer for the picture, many for
 the repos - the four-surfaces drift problem is prevented by construction,
 not by sync scripts.
+
+## Supervising a lane (set by Zaal, 2026-08-31; extended 2026-09-01)
+
+The rules above say who writes what. These say how one terminal watches another,
+and they exist because on the day they were written **a lane and its supervisor
+were each wrong three times, and each caught the other.** Neither was reliably
+right, so the rules are built around that rather than around seniority.
+
+### 1. What reaches the human
+
+**Only what changes his next action.** Four categories:
+
+- a decision the lane needs from him
+- a contradiction with something he currently believes
+- anything with a deadline
+- anything about to be sent, published or merged outward
+
+Everything else is held and folded into a summary when he asks. Measured against
+one real day, that is about five messages instead of twenty.
+
+The failure mode to avoid is **narrating a working system**. If the lane is doing
+well, that is not news. "Reserved a doc number", "running the tests", "PRs
+changed: none" - none of those reach him.
+
+### 2. Intervening mid-action
+
+**Message the lane directly, tell the human after.** Speed matters when it is
+mid-write; a correction that arrives after the commit is archaeology.
+
+This is granted knowing the supervisor will sometimes be wrong. The cost of a
+wrong intervention is one message and a correction. The cost of a late one is a
+merged commit or a sent email.
+
+### 3. When the two disagree
+
+**Neither wins by rank.** Zaal, 2026-08-31: *"I'd like both to tell the other why
+they think one way and then come to a solution. If it can't, ask Zaal."*
+
+1. **Say why, not just what.** "This is wrong" is not a position. "This is wrong
+   because I grepped the string and found eight files" is.
+2. **The other side answers the reasoning**, not the conclusion.
+3. **Converge.** Usually one side has measured and the other has remembered, and
+   that resolves it without anyone conceding anything.
+4. **Only if it will not converge does it go to the human** - with both positions
+   stated, not one position and a complaint.
+
+**Converging on "we do not know" is a successful outcome**, not a failure to
+decide. On the day this was written, two terminals stopped on an ambiguous name,
+neither had evidence, nobody guessed, and it went up unresolved. That was the
+right ending.
+
+This appears to be an original: the published multi-agent literature covers
+orchestrator-to-worker delegation and says nothing about two peers disagreeing on
+a fact.
+
+### 4. Ask what the lane has already measured before asserting a limit on it
+
+Added 2026-09-01, after the supervisor did the thing this whole file is about.
+
+It measured that no configured MCP server could reach a particular database -
+true, and re-checked - and told the lane it **could not read** that database,
+raising a gate on that basis. The lane had read it hours earlier by another
+route, and said so.
+
+The measurement was correct. The conclusion did not follow. *"No configured MCP
+reaches it"* is a fact about the supervisor's instruments; it was silently
+promoted into a fact about the lane's capabilities.
+
+The lane's framing, which is better than the rule:
+
+> **"A board that only sees menus and a peer that only sees its own probes fail
+> the same way. Measure the lane, not the surface."**
+
+So: before telling a lane what it cannot do, ask it what it has already done. A
+supervisor's probes describe the supervisor.
+
+### 5. Continuity
+
+Supervision is a job, so it transfers like one. When a supervising session runs
+low on context it hands the watch on explicitly, in the handoff, rather than
+letting it die quietly. **A lane that believes it is being watched and is not is
+worse than one that knows it is alone.**
+
+Concretely: the watcher process dies with the session that started it. Re-arming
+it is the first thing a successor does, before any other work.
+
+### The shape underneath all five
+
+The recurring failure is **something asserted without being measured**. Every
+rule above is a way of catching that in something other than yourself.
+
+So the supervisor's real job is not correctness. It is being the second place a
+claim has to survive.
 
 ## Conventions to adopt
 
@@ -146,6 +239,18 @@ which is the one way a redaction pass makes things worse.
 - **Pickers eat text**: a pane sitting on a numbered picker sends any text
   into a free-text field. The board detects choice-prompt; answer with arrow
   keys + Enter, verify cursor with a read first.
+
+## Dated snapshots below this line - not current state
+
+Everything from here down is a **snapshot of one moment**, kept because the
+reasoning in it is still useful. Run ids, lane lists, cap status and "still
+unadopted" claims were true on the date in their heading and are almost
+certainly false now.
+
+Read them as history. If you need current state, measure it: `zao-lanes`,
+`orca orchestration task-list`, `orca worktree ps`. A playbook that presents a
+stale snapshot as the present is the exact defect the rest of this file warns
+about.
 
 ## Adopted 2026-08-25 late evening: orchestration runs/tasks/gates
 
