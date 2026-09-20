@@ -1,0 +1,5 @@
+
+# browse/gstack writes a network log into every repo it runs in.
+# 11 of the 12 repos carrying one already ignore it; this was the exception.
+# Measured 2026-09-20, research doc 2514.
+.gstack/
