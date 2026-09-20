@@ -115,6 +115,35 @@ that the boundary is real.
 Nothing is built. No contract has been read. See `docs/REPO-LAYOUT.md` for what
 would land where when it is.
 
+## Orca itself - the measured picture
+
+ZORCA drives Orca's public CLI, so what that CLI can actually do is part of this
+layer's ground truth. The ZAO research library holds it, measured rather than
+recalled. Read these before writing a new Orca call:
+
+| Doc | What it establishes |
+|---|---|
+| [**2513 - Orca: what the ADE actually provides, what we use, and how to use it well**](https://github.com/bettercallzaal/ZAOOS/tree/main/research/dev-workflows/2513-orca-ade-capabilities) | Orca 1.4.204's whole command surface against what this estate invokes: **19 of 234 commands used, 215 untouched**. The high-value unused ones were run, not read from help text - including a control pair showing `terminal wait --for tui-idle` returns rc 0 on an idle pane in 0.11s and rc 1 on a working one at timeout. Ends in eight best practices. **Link goes live when ZAOOS #3588 merges; it 404s until then, checked 2026-09-20.** |
+| [**2407 - Orca and the Wall are blind in the same way**](https://github.com/bettercallzaal/ZAOOS/tree/main/research/dev-workflows/2407-orca-tmux-lane-integration) | Why **Orca is the viewer and tmux is the substrate**, and why the lane system was deliberately not migrated into it. |
+| [**2497 - Managing zorca: what to upgrade**](https://github.com/bettercallzaal/ZAOOS/tree/main/research/agents/2497-zorca-upgrades) | The audit of this layer's own tooling - the hand-written line count, and the supervisor that turned out not to have been running. |
+
+### The four rules that cost the most to learn
+
+1. **Read the schema before writing the call.** `orca agent-context --json`
+   prints all 234 commands. Flags are not guessable: it is `--terminal <handle>`,
+   never `--id`.
+2. **Wait, do not poll.** `orca terminal wait --for tui-idle` exits 0 when
+   satisfied and 1 on timeout. Deriving "idle" from pane text reads interface
+   chrome as intent - it has reported a confirm dialog's highlighted default as
+   something a person typed.
+3. **A decision owed to a human belongs in a gate, not a pane.**
+   `orca orchestration gate-create` takes `--task`. A picker sitting open in a
+   pane appears in no list, and the pane cannot receive while it is open, so a
+   message queue can build behind it unseen.
+4. **Never point a long-running process at a path inside a shared checkout.** A
+   tree that lanes switch branches in will make the file vanish under a running
+   daemon. Keep daemons on a path that does not move.
+
 ## Requires
 
 - Orca installed with its CLI on PATH (`orca status` works)
