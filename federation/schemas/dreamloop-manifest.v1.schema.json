@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dreamnet.ink/schemas/dreamloop-manifest.v1.schema.json",
+  "title": "DreamNet Portable DreamLoop Action Manifest Schema v1",
+  "description": "Engine-agnostic portable skill specification with deterministic preconditions, bounded execution steps, policy fences, and falsifiable postcondition checks.",
+  "type": "object",
+  "required": [
+    "schema",
+    "manifest_id",
+    "name",
+    "version",
+    "description",
+    "status",
+    "preconditions",
+    "allowed_tools",
+    "blocked_actions",
+    "steps",
+    "postconditions",
+    "evidence_verification",
+    "receipt_contract"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "dreamnet.dreamloop.v1"
+    },
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^dl:skill:[a-z0-9_-]+$"
+    },
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "draft", "quarantined", "deprecated"]
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check_type", "expression", "expected_value"],
+        "properties": {
+          "check_type": { "type": "string", "enum": ["FILE_EXISTS", "ENV_VAR_SET", "SHA256_MATCH", "COMMAND_EXIT_ZERO"] },
+          "expression": { "type": "string" },
+          "expected_value": { "type": "string" }
+        }
+      }
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "blocked_actions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step_index", "action", "timeout_seconds"],
+        "properties": {
+          "step_index": { "type": "integer" },
+          "action": { "type": "string" },
+          "timeout_seconds": { "type": "integer" },
+          "retry_limit": { "type": "integer" }
+        }
+      }
+    },
+    "postconditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["assertion_id", "observation_method", "expected_terminal_invariant"],
+        "properties": {
+          "assertion_id": { "type": "string" },
+          "observation_method": { "type": "string", "enum": ["INDEPENDENT_PROBE", "READBACK_DIFF", "EXIT_CODE", "INTEGRATION_TEST"] },
+          "expected_terminal_invariant": { "type": "string" }
+        }
+      }
+    },
+    "evidence_verification": {
+      "type": "object",
+      "required": ["artifact_path", "digest_algorithm", "enforce_nonzero_output"],
+      "properties": {
+        "artifact_path": { "type": "string" },
+        "digest_algorithm": { "type": "string", "enum": ["SHA-256", "SHA-512"] },
+        "enforce_nonzero_output": { "type": "boolean" }
+      }
+    },
+    "receipt_contract": {
+      "type": "string",
+      "const": "outcome-receipt.v1"
+    }
+  }
+}

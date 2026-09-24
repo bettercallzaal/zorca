@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dreamnet.ink/schemas/outcome-receipt.v1.schema.json",
+  "title": "DreamNet Outcome Receipt Schema v1",
+  "description": "Tamper-evident verification receipt produced by an independent observer outside the executing agent's blast radius.",
+  "type": "object",
+  "required": [
+    "schema",
+    "receipt_id",
+    "mission_id",
+    "contract_id",
+    "lease_id",
+    "executor_did",
+    "observer_did",
+    "observed_terminal_state",
+    "evidence_manifest",
+    "side_effects_verified",
+    "unresolved_claims",
+    "observed_at",
+    "receipt_hash",
+    "observer_signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "outcome-receipt.v1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^rcpt:outcome:[a-zA-Z0-9_-]+$"
+    },
+    "mission_id": {
+      "type": "string"
+    },
+    "contract_id": {
+      "type": "string"
+    },
+    "lease_id": {
+      "type": "string"
+    },
+    "executor_did": {
+      "type": "string"
+    },
+    "observer_did": {
+      "type": "string"
+    },
+    "observed_terminal_state": {
+      "type": "string",
+      "enum": ["SUCCESS", "PARTIAL_SUCCESS", "SAFE_FAILURE", "BLOCKED", "NEEDS_HUMAN", "INVALID_TASK", "AUTHORITY_INSUFFICIENT"]
+    },
+    "evidence_manifest": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_uri", "content_hash", "observation_method"],
+        "properties": {
+          "artifact_uri": { "type": "string" },
+          "content_hash": { "type": "string", "description": "SHA-256 digest of verified output artifact" },
+          "observation_method": { "type": "string", "enum": ["INDEPENDENT_PROBE", "READBACK_DIFF", "EXTERNAL_API_CHECK", "INTEGRATION_TEST"] }
+        }
+      }
+    },
+    "side_effects_verified": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "unresolved_claims": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "receipt_hash": {
+      "type": "string",
+      "description": "Deterministic SHA-256 Merkle hash of all receipt contents"
+    },
+    "observer_signature": {
+      "type": "object",
+      "required": ["observer_office", "signature_digest"],
+      "properties": {
+        "observer_office": { "type": "string" },
+        "signature_digest": { "type": "string" }
+      }
+    }
+  }
+}
