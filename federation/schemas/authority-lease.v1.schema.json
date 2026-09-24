@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dreamnet.ink/schemas/authority-lease.v1.schema.json",
+  "title": "DreamNet Authority Lease Schema v1",
+  "description": "Authenticated, narrowing, expiring, and revocable authority lease issued by Customs to an agent.",
+  "type": "object",
+  "required": [
+    "schema",
+    "lease_id",
+    "mission_id",
+    "grantee_did",
+    "parent_lease_id",
+    "authorized_tools",
+    "network_destinations",
+    "spend_ceiling_usd",
+    "issued_at",
+    "expires_at",
+    "revocation_channel",
+    "status",
+    "authority_signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "authority-lease.v1"
+    },
+    "lease_id": {
+      "type": "string",
+      "pattern": "^lease:auth:[a-zA-Z0-9_-]+$"
+    },
+    "mission_id": {
+      "type": "string",
+      "pattern": "^mission:[a-zA-Z0-9_-]+$"
+    },
+    "grantee_did": {
+      "type": "string"
+    },
+    "parent_lease_id": {
+      "type": ["string", "null"]
+    },
+    "authorized_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "network_destinations": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "spend_ceiling_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "revocation_channel": {
+      "type": "string",
+      "description": "NATS subject or event stream monitored for instant revocation signals"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ACTIVE", "EXPIRED", "REVOKED", "SUPERSEDED", "HOLD_FROZEN"]
+    },
+    "authority_signature": {
+      "type": "object",
+      "required": ["issuer_office", "algorithm", "signature_digest"],
+      "properties": {
+        "issuer_office": { "type": "string" },
+        "algorithm": { "type": "string" },
+        "signature_digest": { "type": "string" }
+      }
+    }
+  }
+}
