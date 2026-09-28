@@ -1,5 +1,11 @@
 # ZORCA Federation Boundary
 
+> **STATUS: DRAFT SPEC, NOT LIVE, NOT YET THE ZAO'S IDENTITY.** Merged on 2026-09-27 as a draft, by Zaal's ruling ("Merge as a draft spec"). Nothing in this directory is read, served, signed or sent by any code. Before any of it is switched on:
+> 1. **The signing key.** `capability-card.json` names an Ed25519 public key (`kid: zao-fed-key-2026`) as The ZAO's federation identity. Nobody on the ZAO side has confirmed who generated it or holds the private half. Generate and hold the key on the ZAO side, or confirm its provenance, before anything is signed with it.
+> 2. **The contract.** `docs/REPO-LAYOUT.md` says no envelope is specified until the partner's public federation contract and receipt format have been read. Confirm which published contract these schemas match, with a link, before treating them as the real one.
+> 3. **The payout address.** `recipient_address` is the zero address, a placeholder.
+> The federation canary comes after the foundation is clean.
+
 This directory defines the public federation contract between external systems (such as DreamNet) and The ZAO's internal orchestration layer (ZORCA / Orca).
 
 ## The Core Rule
