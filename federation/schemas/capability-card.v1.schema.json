@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dreamnet.ink/schemas/capability-card.v1.schema.json",
+  "title": "DreamNet / ZAO Capability Card & Federation Boundary Schema v1",
+  "description": "Public boundary contract declaring civilization capabilities, transport endpoints, proof requirements, and envelope mapping without exposing internal agent topology.",
+  "type": "object",
+  "required": [
+    "schema",
+    "civilization_id",
+    "protocol_versions",
+    "public_key",
+    "capabilities",
+    "accepted_work_packet_types",
+    "transport_endpoints",
+    "proof_requirements",
+    "credential_requirements",
+    "payment_methods",
+    "data_egress_policy",
+    "max_delegation",
+    "callback_endpoints"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "capability-card.v1"
+    },
+    "civilization_id": {
+      "type": "string",
+      "description": "Canonical DID or civilization identifier (e.g. did:dreamnet:civ-01, did:zao:estate-01)"
+    },
+    "protocol_versions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Supported protocol iterations e.g. ['v1.0', 'zorca-fed-v1']"
+    },
+    "public_key": {
+      "type": "object",
+      "required": ["kty", "crv", "x", "kid"],
+      "properties": {
+        "kty": { "type": "string" },
+        "crv": { "type": "string" },
+        "x": { "type": "string" },
+        "kid": { "type": "string" }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["capability_id", "description", "input_schema_hash", "output_schema_hash", "estimated_settlement_ms"],
+        "properties": {
+          "capability_id": { "type": "string" },
+          "description": { "type": "string" },
+          "input_schema_hash": { "type": "string" },
+          "output_schema_hash": { "type": "string" },
+          "estimated_settlement_ms": { "type": "integer" }
+        }
+      }
+    },
+    "accepted_work_packet_types": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "transport_endpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["protocol", "uri"],
+        "properties": {
+          "protocol": { "type": "string", "enum": ["NATS", "HTTPS", "WEBHOOK", "LIBP2P"] },
+          "uri": { "type": "string" }
+        }
+      }
+    },
+    "proof_requirements": {
+      "type": "object",
+      "required": ["minimum_terminal_state", "evidence_hash_required", "independent_observer_required"],
+      "properties": {
+        "minimum_terminal_state": { "type": "string", "enum": ["SUCCESS", "PARTIAL_SUCCESS"] },
+        "evidence_hash_required": { "type": "boolean" },
+        "independent_observer_required": { "type": "boolean" }
+      }
+    },
+    "credential_requirements": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "payment_methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rail", "token", "recipient_address"],
+        "properties": {
+          "rail": { "type": "string", "enum": ["BASE_USDC", "ETHEREUM_USDC", "LIGHTNING", "OFF_CHAIN_NETTING"] },
+          "token": { "type": "string" },
+          "recipient_address": { "type": "string" }
+        }
+      }
+    },
+    "data_egress_policy": {
+      "type": "string",
+      "enum": ["AIRGAPPED", "HASH_ONLY", "METADATA_ONLY", "SCOPED_RESULT_PAYLOAD"]
+    },
+    "max_delegation": {
+      "type": "integer",
+      "description": "Maximum depth of sub-delegated work packets across federation boundaries"
+    },
+    "callback_endpoints": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
