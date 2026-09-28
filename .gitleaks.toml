@@ -1,0 +1,12 @@
+# Gitleaks config: the default rules, plus one narrow allowlist.
+# The generic-api-key rule matches any long hex string under a key named
+# "token". The value below is the public USDC contract address on Base
+# mainnet (https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913),
+# which is published on-chain and is not a credential. Allow exactly that
+# value and nothing else; every other finding still fails the scan.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public on-chain contract addresses (not credentials)"
+regexes = ['''^0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913$''']
