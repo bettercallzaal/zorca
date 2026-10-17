@@ -9,7 +9,8 @@ is the adapter: the place where internal work is translated into a public
 contract, so a partner system can ask for something without being handed the
 keys to the estate.
 
-Orca itself is closed source and unaffiliated. ZORCA only drives its public CLI
+Orca itself is open source (MIT, github.com/stablyai/orca) and unaffiliated with
+The ZAO. ZORCA only drives its public CLI
 (`orca terminal ...`, `orca host ...`, `orca environment ...`). Nothing here
 patches or redistributes the app, and that is deliberate: **the adapter must not
 depend on anything Orca-specific, or swapping the cockpit out breaks the
