@@ -2,7 +2,7 @@
 type: playbook
 status: active
 created: 2026-08-25
-updated: 2026-09-01
+updated: 2026-11-09
 tags: [orca, orchestration, workflow]
 source: manual
 confidence: high
@@ -15,6 +15,33 @@ State as of 2026-08-25 evening: 9 live panes, 65 registered worktrees, 63
 registered repos, 3 project groups, 0 automations, 0 orchestration runs. The
 CLI can do runs/tasks/gates/workers; none of it is in use. The gap is not
 tooling, it is convention.
+
+## Orca 1.4.255 check (2026-11-09)
+
+Measured against stablyai/orca `docs/site/content/docs/cli/orchestration.mdx`
+and `src/cli/specs/orchestration*.ts` on 2026-11-09 (release v1.4.255, same
+day). Every command this playbook names still exists. What changed is that
+Orca now does three things this playbook does by hand.
+
+| This playbook does | Orca 1.4.255 does | Fixes |
+|---|---|---|
+| `terminal create` + `dispatch --inject` + `terminal send` a brief | `orca orchestration worker-start --task <id> --worktree current\|new-child --agent claude` | "dispatch without --inject briefs nobody" and "terminal send loses the head": the worker gets Orca's own preamble with task and dispatch ids |
+| poll `orca orchestration inbox` | end the turn; Orca wakes the coordinator, then `orca orchestration check --run <id>` (FIFO, marks handled; `--peek` to look without consuming) | coordinator busy-polling |
+| worker asks in its TUI, a picker eats text | worker runs `orca orchestration ask`, ends its turn, gets the answer as mail | "pickers eat text" for orchestrated lanes |
+
+Also: `orchestration run` is retired, use `run-create`. `worker-start
+--keep-open` keeps a finished pane, `worker-stop` / `worker-release` close it,
+`--retry-of <dispatchId>` retries. `reset` is runtime-global: never while
+another coordinator is active.
+
+Not checked yet: whether `terminal send` still drops the head of long text
+after compaction. Keep the "short brief, constraint last, read back" rule
+until a lane proves otherwise. Re-run this check on each Orca minor version.
+
+**Fork or layer.** ZORCA stays a layer on Orca's public CLI and is not a fork.
+Orca ships most days (v1.4.255 on 2026-11-09, MIT), so a code fork goes stale
+in a week, the same failure as the old 18-line `zorca-brief`. If ZAO needs an
+Orca change, fork stablyai/orca only to send that change upstream as a PR.
 
 ## The operating loop (running now)
 
